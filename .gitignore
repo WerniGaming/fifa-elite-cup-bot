@@ -1,0 +1,7 @@
+bot/.env
+bot/__pycache__/
+**/__pycache__/
+*.pyc
+fifa-elite-web/.env.local
+fifa-elite-web/node_modules/
+fifa-elite-web/.next/

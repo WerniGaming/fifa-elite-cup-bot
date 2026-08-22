@@ -1,0 +1,4 @@
+discord.py>=2.7.0
+curl_cffi>=0.16.0
+python-dotenv>=1.0
+asyncpg>=0.29
