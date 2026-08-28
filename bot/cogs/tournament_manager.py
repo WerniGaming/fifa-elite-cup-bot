@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed
+from permissions import is_tournament_admin
 from typing import Literal
 from cogs.team_manager import get_team_for_user, get_role_for_user, get_team_managers
 
@@ -45,18 +46,27 @@ from ea_api import EAProClubsAPI
 
 log = logging.getLogger("fifa-elite-cup")
 
-ALLOWED_BRACKET_SIZES = [4, 8, 16, 32, 64, 128]
+ALLOWED_BRACKET_SIZES = sorted(set(
+    [n for n in range(8, 129, 4)] +  # durch 4er-Gruppen sauber teilbar: 8,12,16,20,24,28,32...
+    [n for n in range(8, 129, 6)]    # durch 6er-Gruppen sauber teilbar: 12,18,24,30...
+))
+
+
+def group_size_for(bracket_size: int) -> int:
+    """4er-Gruppen bevorzugt (mehr Spiele, kleinere Gruppen), 6er nur wenn 4 nicht sauber aufgeht."""
+    return 4 if bracket_size % 4 == 0 else 6
 
 
 # ---------- Hilfsfunktionen ----------
 
 def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int) -> int:
     """
-    Die 'aktive Stufe' ist die groesste Zweierpotenz, fuer die bereits GENUG
-    Anmeldungen (registriert + Warteliste zusammen) vorliegen, um sie
-    komplett zu fuellen. Ein einzelnes Team ueber der aktuellen Stufe wandert
-    also erst auf die Warteliste, statt die Stufe sofort hochzuschalten -
-    die naechste Stufe wird erst 'aktiv', wenn sie wirklich voll waere.
+    Die 'aktive Stufe' ist die groesste Turniergroesse, fuer die bereits GENUG
+    Anmeldungen (registriert + Warteliste zusammen) vorliegen, um sie komplett
+    zu fuellen (in sauberen 4er- oder 6er-Gruppen). Ein einzelnes Team ueber
+    der aktuellen Stufe wandert also erst auf die Warteliste, statt die Stufe
+    sofort hochzuschalten - die naechste Stufe wird erst 'aktiv', wenn sie
+    wirklich voll waere.
     """
     candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
     if not candidates:
@@ -275,9 +285,10 @@ async def advance_tournament(tournament_id: int, current_round: int, bracket: st
             return ("finished", winners[0], round_num)
 
         # Halbfinale abgeschlossen (genau 2 Gewinner ziehen in die naechste Runde ein,
-        # die dann das Finale ist) -> im Winner-Bracket zusaetzlich ein Spiel um Platz 3
-        # zwischen den beiden Halbfinal-Verlierern anlegen.
-        if bracket == "winner" and len(winners) == 2 and len(matches) == 2:
+        # die dann das Finale ist) -> zusaetzlich ein Spiel um Platz 3 zwischen den
+        # beiden Halbfinal-Verlierern anlegen - gilt fuer BEIDE Brackets (Winner + Loser),
+        # da beide als eigene KO-Phase bis Finale + Spiel um Platz 3 laufen sollen.
+        if len(winners) == 2 and len(matches) == 2:
             losers = []
             for m in matches:
                 if m["team1_id"] and m["team2_id"]:  # nur echte Spiele, keine Freilose
@@ -485,8 +496,8 @@ async def build_bracket_finish_embed(tournament_id: int, champion_id: int, brack
         final_round = final_match["round"]
 
     third_place_id = None
-    if bracket == "winner":
-        third_place_id = t.get("winner_bracket_third_id")
+    third_place_column = "winner_bracket_third_id" if bracket == "winner" else "loser_bracket_third_id"
+    third_place_id = t.get(third_place_column)
     if third_place_id is None and final_round and final_round > 1:
         semi_matches = await pool.fetch(
             """
@@ -538,14 +549,15 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
     t = await get_tournament(match["tournament_id"])
 
     if match.get("is_third_place_match"):
+        column = "winner_bracket_third_id" if match["bracket"] == "winner" else "loser_bracket_third_id"
         await pool.execute(
-            "UPDATE tournaments SET winner_bracket_third_id = $1 WHERE id = $2",
+            f"UPDATE tournaments SET {column} = $1 WHERE id = $2",
             winner_id, match["tournament_id"],
         )
         names = await team_name_map([match["team1_id"], match["team2_id"]])
         bracket_meta = await pool.fetchrow(
-            "SELECT * FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = 'winner'",
-            match["tournament_id"],
+            "SELECT * FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
+            match["tournament_id"], match["bracket"],
         )
         if bracket_meta:
             channel = guild.get_channel(bracket_meta["channel_id"])
@@ -648,18 +660,18 @@ class ScoreModal(discord.ui.Modal):
             s1 = int(self.score1_input.value)
             s2 = int(self.score2_input.value)
         except ValueError:
-            await interaction.response.send_message(embed=error_embed("Bitte gültige Zahlen eingeben."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Bitte gültige Zahlen eingeben."), ephemeral=True)
             return
 
         if self.is_admin:
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 await finalize_match_result(interaction.client, interaction.guild, self.match_id, s1, s2)
-                await interaction.followup.send(embed=success_embed(f"Admin-Ergebnis gespeichert: {s1}:{s2}"), ephemeral=True)
+                await interaction.followup.send(view=success_embed(f"Admin-Ergebnis gespeichert: {s1}:{s2}"), ephemeral=True)
             except Exception:
                 log.exception(f"Fehler beim Verarbeiten des Admin-Ergebnisses für Match {self.match_id}")
                 await interaction.followup.send(
-                    embed=error_embed(
+                    view=error_embed(
                         f"Ergebnis {s1}:{s2} wurde gespeichert, aber danach ist ein Fehler aufgetreten",
                         "(z.B. beim Starten der KO-Phase oder Aktualisieren des Live-Spielplans). Bitte im Log nachschauen.",
                     ),
@@ -689,7 +701,21 @@ class ScoreModal(discord.ui.Modal):
             f"{names.get(match['team1_id'])} {s1}:{s2} {names.get(match['team2_id'])}",
             "Ergebnis gemeldet - bitte bestätigen oder ablehnen.",
         )
-        await interaction.response.send_message(content=mentions, embed=embed, view=ConfirmMatchView(self.match_id))
+
+        image_file = None
+        if match["phase"] == "group" and match.get("group_id"):
+            try:
+                image_file = await build_group_schedule_image_for_round(match["group_id"], match["round"])
+            except Exception:
+                log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Bestaetigungs-Embed (Match {self.match_id})")
+
+        if image_file:
+            embed.set_image(url=f"attachment://{image_file.filename}")
+            await interaction.response.send_message(
+                content=mentions, embed=embed, file=image_file, view=ConfirmMatchView(self.match_id)
+            )
+        else:
+            await interaction.response.send_message(content=mentions, embed=embed, view=ConfirmMatchView(self.match_id))
 
 
 class ConfirmMatchView(discord.ui.View):
@@ -723,7 +749,7 @@ async def resolve_match_score_entry(interaction: discord.Interaction, match_id: 
         try:
             await finalize_match_result(interaction.client, interaction.guild, match_id, s1, s2)
             await interaction.followup.send(
-                embed=success_embed(
+                view=success_embed(
                     "Ergebnis automatisch aus der EA-API übernommen",
                     f"**{team1['name']} {s1}:{s2} {team2['name']}**",
                 ),
@@ -731,7 +757,7 @@ async def resolve_match_score_entry(interaction: discord.Interaction, match_id: 
         except Exception:
             log.exception(f"Fehler beim Verarbeiten des EA-Ergebnisses für Match {match_id}")
             await interaction.followup.send(
-                embed=error_embed(f"Ergebnis {s1}:{s2} wurde gespeichert, aber danach ist ein Fehler aufgetreten", "Bitte im Log nachschauen."),
+                view=error_embed(f"Ergebnis {s1}:{s2} wurde gespeichert, aber danach ist ein Fehler aufgetreten", "Bitte im Log nachschauen."),
                 ephemeral=True,
             )
         return
@@ -1006,6 +1032,46 @@ async def send_matchday_reminder(channel: discord.abc.Messageable, matchday: int
         pass
 
 
+async def build_group_schedule_image_for_round(group_id: int, round_num: int) -> discord.File | None:
+    """Rendert NUR das Bild-Segment (max. 3 Spieltage), das den angegebenen Spieltag enthaelt."""
+    pool = get_pool()
+    all_group_matches = await pool.fetch(
+        "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group_id
+    )
+    if not all_group_matches:
+        return None
+    group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
+
+    all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
+        m["team2_id"] for m in all_group_matches if m["team2_id"]
+    }
+    team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
+
+    max_matchday = max(m["round"] for m in all_group_matches)
+    matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
+    for m in all_group_matches:
+        if m["team1_id"] is None or m["team2_id"] is None:
+            continue
+        idx = m["round"] - 1
+        t1, t2 = team_rows[m["team1_id"]], team_rows[m["team2_id"]]
+        matchdays_data[idx].append({
+            "team1_name": t1["name"], "team2_name": t2["name"],
+            "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
+        })
+
+    from graphics import MATCHDAYS_PER_IMAGE, generate_group_schedule_images
+    chunk_index = (round_num - 1) // MATCHDAYS_PER_IMAGE
+    start = chunk_index * MATCHDAYS_PER_IMAGE
+    relevant_chunk = matchdays_data[start:start + MATCHDAYS_PER_IMAGE]
+    if not relevant_chunk:
+        return None
+
+    image_bufs = await generate_group_schedule_images(relevant_chunk)
+    if not image_bufs:
+        return None
+    return discord.File(image_bufs[0], filename=f"spielplan_gruppe_{group['group_number']}.png")
+
+
 async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: int, matchday: int):
     """Gibt einen Spieltag frei: postet Paarungen im Gruppenkanal, DMt alle Manager, startet 5-Min-Reminder."""
     pool = get_pool()
@@ -1145,7 +1211,7 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
     while len(team_ids) < bracket_size:
         team_ids.append(None)  # Freilos - fehlende Teams bis zur Turnierstufe auffuellen
 
-    group_size = t["group_size"] or 4
+    group_size = group_size_for(bracket_size)
     num_groups = max(1, bracket_size // group_size)
     groups: list[list[int | None]] = [[] for _ in range(num_groups)]
     for i, tid in enumerate(team_ids):
@@ -1494,15 +1560,15 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     if claimed is None:
         return  # Ein anderer Aufruf hat die KO-Phase bereits gestartet
 
-    winner_n = t["advance_per_group"] or 3
-    loser_n = t["loser_advance_per_group"] or 3
     standings = await get_group_standings(tournament_id)
 
     winner_teams: list[int] = []
     loser_teams: list[int] = []
     for g in standings:
+        group_len = len(g["standings"])
+        winner_n = group_len // 2  # 4er-Gruppe -> 2, 6er-Gruppe -> 3
         winner_teams += [s["team_id"] for s in g["standings"][:winner_n]]
-        loser_teams += [s["team_id"] for s in g["standings"][winner_n:winner_n + loser_n]]
+        loser_teams += [s["team_id"] for s in g["standings"][winner_n:]]
 
     await create_bracket(bot, guild, tournament_id, t, "winner", winner_teams)
     await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams)
@@ -1561,13 +1627,13 @@ def estimate_schedule(t: dict, registered_count: int) -> dict:
 
     effective_count = max(registered_count, t["min_teams"])
     bracket_size = compute_bracket_size(effective_count, MIN_BRACKET_SIZE, t["max_teams"])
-    group_size = t.get("group_size") or 4
+    group_size = group_size_for(bracket_size)
     num_groups = max(1, bracket_size // group_size)
     teams_per_group = max(2, bracket_size // num_groups)
     matchdays = teams_per_group - 1 if teams_per_group % 2 == 0 else teams_per_group
     group_end = start + timedelta(minutes=matchdays * rhythmus + 15)
 
-    winner_n = t.get("advance_per_group") or 3
+    winner_n = teams_per_group // 2
     ko_count = max(2, num_groups * winner_n)
     ko_rounds = max(1, math.ceil(math.log2(ko_count)))
     ko_end = group_end + timedelta(minutes=15 + ko_rounds * rhythmus + 10)
@@ -1594,7 +1660,7 @@ class TournamentPanel(discord.ui.LayoutView):
         schedule = estimate_schedule(t, total_signups)
         rhythmus = t.get("minutes_per_round") or 20
         bracket_size = schedule.get("bracket_size", t["min_teams"])
-        group_size = t.get("group_size") or 4
+        group_size = group_size_for(bracket_size)
         num_groups = max(1, bracket_size // group_size)
 
         # Block 1: Titel, Datum, Spielrhythmus, Zeitplan
@@ -1633,6 +1699,7 @@ class TournamentPanel(discord.ui.LayoutView):
         # Block 2: Mannschaftsliste + Warteliste
         activity_check_phase = t["status"] == "closed" and t.get("phase") == "signup"
         confirmed_count = sum(1 for tm in registered_teams if tm.get("confirmed_active")) if activity_check_phase else 0
+        paid_team_ids = t.get("_paid_team_ids", set()) if t.get("is_donation_tournament") else set()
 
         team_lines = [
             f"### {bracket_size}er Turnier — {num_groups} Gruppen à {group_size} Teams | Winner + Loser Bracket",
@@ -1641,11 +1708,15 @@ class TournamentPanel(discord.ui.LayoutView):
         if activity_check_phase:
             team_lines.append(f"**Aktivitätscheck:** `{confirmed_count}` / `{registered}` Teams bestätigt")
             team_lines.append("")
+        if t.get("is_donation_tournament"):
+            team_lines.append(f"**Bezahlt:** `{len(paid_team_ids)}` / `{registered}` Teams 💰")
+            team_lines.append("")
         for i in range(1, bracket_size + 1):
             if i <= registered:
                 team = registered_teams[i - 1]
                 mark = " ✅" if activity_check_phase and team.get("confirmed_active") else ""
-                team_lines.append(f"`{i}.` **{team['name']}** (<@{team['owner_discord_id']}>){mark}")
+                paid_mark = " 💰" if team["id"] in paid_team_ids else ""
+                team_lines.append(f"`{i}.` **{team['name']}** (<@{team['owner_discord_id']}>){mark}{paid_mark}")
             else:
                 team_lines.append(f"`{i}.` –")
 
@@ -1709,9 +1780,20 @@ class TournamentPanel(discord.ui.LayoutView):
         self.add_item(container)
 
 
+async def get_paid_team_ids(tournament_id: int) -> set[int]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT team_id FROM tickets WHERE tournament_id = $1 AND payment_status = 'confirmed'", tournament_id
+    )
+    return {r["team_id"] for r in rows}
+
+
 async def build_tournament_panel(t: dict) -> TournamentPanel:
     registered_teams = await get_registered_teams(t["id"])
     waitlist_teams = await get_waitlisted_teams(t["id"])
+    if t.get("is_donation_tournament"):
+        t = dict(t)
+        t["_paid_team_ids"] = await get_paid_team_ids(t["id"])
     return TournamentPanel(t, registered_teams, waitlist_teams)
 
 
@@ -1752,17 +1834,17 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
             min_t = int(self.min_teams.value)
             max_t = int(self.max_teams.value)
         except ValueError:
-            await interaction.followup.send(embed=error_embed("Min./Max. Teams müssen Zahlen sein."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Min./Max. Teams müssen Zahlen sein."), ephemeral=True)
             return
 
         if min_t < 2 or max_t < min_t:
-            await interaction.followup.send(embed=error_embed("Ungültige Werte", "Min. muss >= 2 sein und Max. >= Min."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Ungültige Werte", "Min. muss >= 2 sein und Max. >= Min."), ephemeral=True)
             return
 
         try:
             rhythmus = int(self.spielrhythmus.value)
         except ValueError:
-            await interaction.followup.send(embed=error_embed("Spielrhythmus muss eine Zahl (Minuten) sein."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Spielrhythmus muss eine Zahl (Minuten) sein."), ephemeral=True)
             return
 
         try:
@@ -1770,7 +1852,7 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
             start_time = naive_dt.replace(tzinfo=BERLIN_TZ)
         except ValueError:
             await interaction.followup.send(
-                embed=error_embed("Ungültiges Datum", "Format muss sein: `TT.MM.JJJJ HH:MM`, z.B. `18.08.2026 20:15`"), ephemeral=True
+                view=error_embed("Ungültiges Datum", "Format muss sein: `TT.MM.JJJJ HH:MM`, z.B. `18.08.2026 20:15`"), ephemeral=True
             )
             return
 
@@ -1787,7 +1869,11 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
         t = await get_tournament(tournament_id)
 
         await interaction.followup.send(
-            embed=success_embed(f"Turnier {self.name.value} erstellt", f"ID `{tournament_id}` - wähle jetzt den Kanal für das Anmelde-Panel:"),
+            view=success_embed(f"Turnier {self.name.value} erstellt", f"ID `{tournament_id}`"),
+            ephemeral=True,
+        )
+        await interaction.followup.send(
+            "Wähle jetzt den Kanal für das Anmelde-Panel:",
             view=ChannelPickerView(tournament_id, t),
             ephemeral=True,
         )
@@ -1809,7 +1895,7 @@ class ChannelPickerView(discord.ui.View):
         channel_id = int(interaction.data["values"][0])
         channel = interaction.guild.get_channel(channel_id)
         if channel is None:
-            await interaction.response.send_message(embed=error_embed("Kanal nicht gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Kanal nicht gefunden."), ephemeral=True)
             return
 
         pool = get_pool()
@@ -1863,9 +1949,9 @@ class TournamentStreamLinkModal(discord.ui.Modal, title="Stream-Link ändern"):
         await pool.execute("UPDATE tournaments SET stream_link = $1 WHERE id = $2", self.stream_link.value or None, self.tournament_id)
         await refresh_panel(interaction.client, self.tournament_id)
         if self.stream_link.value:
-            await interaction.response.send_message(embed=success_embed("Stream-Link aktualisiert."), ephemeral=True)
+            await interaction.response.send_message(view=success_embed("Stream-Link aktualisiert."), ephemeral=True)
         else:
-            await interaction.response.send_message(embed=info_embed("Stream-Link entfernt."), ephemeral=True)
+            await interaction.response.send_message(view=info_embed("Stream-Link entfernt."), ephemeral=True)
 
 
 class TournamentCog(commands.Cog):
@@ -1878,19 +1964,19 @@ class TournamentCog(commands.Cog):
         pool = get_pool()
         group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
         if not group:
-            await interaction.response.send_message(embed=error_embed("Gruppe nicht gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Gruppe nicht gefunden."), ephemeral=True)
             return
 
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        is_admin = interaction.user.guild_permissions.administrator
+        is_admin = await is_tournament_admin(interaction.user)
 
         if action == "played":
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
             open_matches = await get_open_matches_for_team(group_id, team["id"])
             if not open_matches:
-                await interaction.response.send_message(embed=warning_embed("Du hast gerade kein offenes Spiel in dieser Gruppe."), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed("Du hast gerade kein offenes Spiel in dieser Gruppe."), ephemeral=True)
                 return
 
             match = open_matches[0]
@@ -1902,7 +1988,7 @@ class TournamentCog(commands.Cog):
             ea_result = await try_fetch_ea_result(team_row, opponent_row)
             if not ea_result:
                 await interaction.followup.send(
-                    embed=warning_embed(
+                    view=warning_embed(
                         "Kein passendes EA-Match gefunden",
                         "Bitte trage das Ergebnis über 'Ergebnis eintragen' manuell ein.",
                     ),
@@ -1916,7 +2002,7 @@ class TournamentCog(commands.Cog):
             await finalize_match_result(self.bot, interaction.guild, match["id"], s1, s2)
             names = await team_name_map([match["team1_id"], match["team2_id"]])
             await interaction.followup.send(
-                embed=success_embed(
+                view=success_embed(
                     "EA-Match gefunden, Ergebnis automatisch übernommen",
                     f"**{names.get(match['team1_id'])} {s1}:{s2} {names.get(match['team2_id'])}**",
                 )
@@ -1928,11 +2014,11 @@ class TournamentCog(commands.Cog):
             elif team:
                 matches = await get_open_matches_for_team(group_id, team["id"])
             else:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team in dieser Gruppe."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team in dieser Gruppe."), ephemeral=True)
                 return
 
             if not matches:
-                await interaction.response.send_message(embed=info_embed("Keine offenen Matches gefunden."), ephemeral=True)
+                await interaction.response.send_message(view=info_embed("Keine offenen Matches gefunden."), ephemeral=True)
                 return
 
             if not is_admin and len(matches) == 1:
@@ -1942,28 +2028,28 @@ class TournamentCog(commands.Cog):
             team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
             names = await team_name_map(team_ids)
             await interaction.response.send_message(
-                embed=info_embed("Welches Match?"), view=GroupMatchSelect(matches, names, is_admin), ephemeral=True
+                content="Welches Match?", view=GroupMatchSelect(matches, names, is_admin), ephemeral=True
             )
 
         elif action == "sizevideo":
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
             open_matches = await get_open_matches_for_team(group_id, team["id"])
             if not open_matches:
-                await interaction.response.send_message(embed=warning_embed("Du hast gerade kein offenes Match in dieser Gruppe."), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed("Du hast gerade kein offenes Match in dieser Gruppe."), ephemeral=True)
                 return
             match = open_matches[0]
             opponent_team_id = match["team2_id"] if match["team1_id"] == team["id"] else match["team1_id"]
             opponent_managers = await get_team_managers(opponent_team_id)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in opponent_managers) or "(kein Manager gefunden)"
-            await interaction.response.send_message(content=mentions, embed=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
+            await interaction.response.send_message(content=mentions, view=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
 
             for m in opponent_managers:
                 try:
                     user = await self.bot.fetch_user(m["discord_id"])
                     await user.send(
-                        embed=info_embed(
+                        view=info_embed(
                             "📹 Größenvideo angefordert",
                             f"**{team['name']}** hat ein Größenvideo von deinem Team in **{interaction.guild.name}** "
                             "gefordert. Schau im Gruppenkanal vorbei.",
@@ -1977,19 +2063,19 @@ class TournamentCog(commands.Cog):
         tournament_id = int(tid_str)
         t = await get_tournament(tournament_id)
         if not t:
-            await interaction.response.send_message(embed=error_embed("Turnier nicht gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Turnier nicht gefunden."), ephemeral=True)
             return
 
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        is_admin = interaction.user.guild_permissions.administrator
+        is_admin = await is_tournament_admin(interaction.user)
 
         if action == "played":
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
             open_matches = await get_open_matches_for_team_bracket(tournament_id, bracket, team["id"])
             if not open_matches:
-                await interaction.response.send_message(embed=warning_embed("Du hast gerade kein offenes Spiel in diesem Bracket."), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed("Du hast gerade kein offenes Spiel in diesem Bracket."), ephemeral=True)
                 return
 
             match = open_matches[0]
@@ -2001,7 +2087,7 @@ class TournamentCog(commands.Cog):
             ea_result = await try_fetch_ea_result(team_row, opponent_row)
             if not ea_result:
                 await interaction.followup.send(
-                    embed=warning_embed(
+                    view=warning_embed(
                         "Kein passendes EA-Match gefunden",
                         "Bitte trage das Ergebnis über 'Ergebnis eintragen' manuell ein.",
                     ),
@@ -2015,7 +2101,7 @@ class TournamentCog(commands.Cog):
             await finalize_match_result(self.bot, interaction.guild, match["id"], s1, s2)
             names = await team_name_map([match["team1_id"], match["team2_id"]])
             await interaction.followup.send(
-                embed=success_embed(
+                view=success_embed(
                     "EA-Match gefunden, Ergebnis automatisch übernommen",
                     f"**{names.get(match['team1_id'])} {s1}:{s2} {names.get(match['team2_id'])}**",
                 )
@@ -2027,11 +2113,11 @@ class TournamentCog(commands.Cog):
             elif team:
                 matches = await get_open_matches_for_team_bracket(tournament_id, bracket, team["id"])
             else:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team in diesem Bracket."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team in diesem Bracket."), ephemeral=True)
                 return
 
             if not matches:
-                await interaction.response.send_message(embed=info_embed("Keine offenen Matches gefunden."), ephemeral=True)
+                await interaction.response.send_message(view=info_embed("Keine offenen Matches gefunden."), ephemeral=True)
                 return
 
             if not is_admin and len(matches) == 1:
@@ -2041,28 +2127,28 @@ class TournamentCog(commands.Cog):
             team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
             names = await team_name_map(team_ids)
             await interaction.response.send_message(
-                embed=info_embed("Welches Match?"), view=GroupMatchSelect(matches, names, is_admin), ephemeral=True
+                content="Welches Match?", view=GroupMatchSelect(matches, names, is_admin), ephemeral=True
             )
 
         elif action == "sizevideo":
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
             open_matches = await get_open_matches_for_team_bracket(tournament_id, bracket, team["id"])
             if not open_matches:
-                await interaction.response.send_message(embed=warning_embed("Du hast gerade kein offenes Match in diesem Bracket."), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed("Du hast gerade kein offenes Match in diesem Bracket."), ephemeral=True)
                 return
             match = open_matches[0]
             opponent_team_id = match["team2_id"] if match["team1_id"] == team["id"] else match["team1_id"]
             opponent_managers = await get_team_managers(opponent_team_id)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in opponent_managers) or "(kein Manager gefunden)"
-            await interaction.response.send_message(content=mentions, embed=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
+            await interaction.response.send_message(content=mentions, view=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
 
             for m in opponent_managers:
                 try:
                     user = await self.bot.fetch_user(m["discord_id"])
                     await user.send(
-                        embed=info_embed(
+                        view=info_embed(
                             "📹 Größenvideo angefordert",
                             f"**{team['name']}** hat ein Größenvideo von deinem Team in **{interaction.guild.name}** "
                             "gefordert. Schau im Bracket-Kanal vorbei.",
@@ -2076,16 +2162,16 @@ class TournamentCog(commands.Cog):
         match_id = int(mid_str)
         match = await get_match(match_id)
         if not match or not match["pending_confirmation"]:
-            await interaction.response.send_message(embed=warning_embed("Dieses Ergebnis steht nicht mehr zur Bestätigung an."), ephemeral=True)
+            await interaction.response.send_message(view=warning_embed("Dieses Ergebnis steht nicht mehr zur Bestätigung an."), ephemeral=True)
             return
 
         reporter_team_id = match["reported_by_team_id"]
         opponent_team_id = match["team2_id"] if reporter_team_id == match["team1_id"] else match["team1_id"]
         role = await get_role_for_user(opponent_team_id, interaction.user.id)
-        is_admin = interaction.user.guild_permissions.administrator
+        is_admin = await is_tournament_admin(interaction.user)
         if not role and not is_admin:
             await interaction.response.send_message(
-                embed=error_embed("Nur der Manager des Gegner-Teams (oder ein Admin) kann dieses Ergebnis bestätigen."), ephemeral=True
+                view=error_embed("Nur der Manager des Gegner-Teams (oder ein Admin) kann dieses Ergebnis bestätigen."), ephemeral=True
             )
             return
 
@@ -2095,7 +2181,7 @@ class TournamentCog(commands.Cog):
             await finalize_match_result(self.bot, interaction.guild, match_id, match["team1_score"], match["team2_score"])
             names = await team_name_map([match["team1_id"], match["team2_id"]])
             await interaction.followup.send(
-                embed=success_embed(
+                view=success_embed(
                     "Ergebnis bestätigt",
                     f"**{names.get(match['team1_id'])} {match['team1_score']}:{match['team2_score']} {names.get(match['team2_id'])}**",
                 )
@@ -2109,7 +2195,7 @@ class TournamentCog(commands.Cog):
                 """,
                 match_id,
             )
-            await interaction.response.send_message(embed=error_embed("Ergebnis abgelehnt", "Bitte erneut eintragen oder Admin kontaktieren."))
+            await interaction.response.send_message(view=error_embed("Ergebnis abgelehnt", "Bitte erneut eintragen oder Admin kontaktieren."))
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -2126,9 +2212,9 @@ class TournamentCog(commands.Cog):
                 log.exception(f"Fehler beim Verarbeiten von custom_id={custom_id!r}")
                 try:
                     if interaction.response.is_done():
-                        await interaction.followup.send(embed=error_embed("Ein interner Fehler ist aufgetreten."), ephemeral=True)
+                        await interaction.followup.send(view=error_embed("Ein interner Fehler ist aufgetreten."), ephemeral=True)
                     else:
-                        await interaction.response.send_message(embed=error_embed("Ein interner Fehler ist aufgetreten."), ephemeral=True)
+                        await interaction.response.send_message(view=error_embed("Ein interner Fehler ist aufgetreten."), ephemeral=True)
                 except discord.HTTPException:
                     pass
 
@@ -2150,26 +2236,26 @@ class TournamentCog(commands.Cog):
         tournament_id = int(tid_str)
         t = await get_tournament(tournament_id)
         if not t:
-            await interaction.response.send_message(embed=error_embed("Dieses Turnier existiert nicht mehr."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Dieses Turnier existiert nicht mehr."), ephemeral=True)
             return
 
         pool = get_pool()
 
         if action == "register":
             if t["status"] != "open":
-                await interaction.response.send_message(embed=warning_embed("Die Anmeldung für dieses Turnier ist geschlossen."), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed("Die Anmeldung für dieses Turnier ist geschlossen."), ephemeral=True)
                 return
 
             from cogs.moderation import get_active_ban, format_ban_reason
             ban = await get_active_ban(interaction.guild_id, interaction.user.id)
             if ban:
-                await interaction.response.send_message(embed=warning_embed(format_ban_reason(ban)), ephemeral=True)
+                await interaction.response.send_message(view=warning_embed(format_ban_reason(ban)), ephemeral=True)
                 return
 
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
                 await interaction.response.send_message(
-                    embed=error_embed("Du brauchst zuerst ein Team", "siehe Team Manager Panel -> 'Team verknüpfen'."), ephemeral=True
+                    view=error_embed("Du brauchst zuerst ein Team", "siehe Team Manager Panel -> 'Team verknüpfen'."), ephemeral=True
                 )
                 return
 
@@ -2177,14 +2263,14 @@ class TournamentCog(commands.Cog):
             team_ban = await get_active_team_ban(interaction.guild_id, team["id"])
             if team_ban:
                 await interaction.response.send_message(
-                    embed=warning_embed(format_team_ban_reason(team_ban, team["name"])), ephemeral=True
+                    view=warning_embed(format_team_ban_reason(team_ban, team["name"])), ephemeral=True
                 )
                 return
 
             existing = await get_team_signup(tournament_id, team["id"])
             if existing and existing["status"] != "withdrawn":
                 await interaction.response.send_message(
-                    embed=info_embed(f"{team['name']} ist bereits angemeldet", f"Status: {existing['status']}"), ephemeral=True
+                    view=info_embed(f"{team['name']} ist bereits angemeldet", f"Status: {existing['status']}"), ephemeral=True
                 )
                 return
 
@@ -2203,10 +2289,16 @@ class TournamentCog(commands.Cog):
             final = await get_team_signup(tournament_id, team["id"])
 
             if final and final["status"] == "registered":
-                await interaction.response.send_message(embed=success_embed(f"{team['name']} ist angemeldet!"), ephemeral=True)
+                await interaction.response.send_message(view=success_embed(f"{team['name']} ist angemeldet!"), ephemeral=True)
+                if t.get("is_donation_tournament"):
+                    try:
+                        from cogs.tickets import create_payment_ticket
+                        await create_payment_ticket(self.bot, interaction.guild, t, team)
+                    except Exception:
+                        log.exception(f"Fehler beim Erstellen des Zahlungs-Kanals fuer Team {team['id']} / Turnier {tournament_id}")
             else:
                 await interaction.response.send_message(
-                    embed=info_embed(
+                    view=info_embed(
                         "Aktuelle Turnierstufe ist voll",
                         f"**{team['name']}** steht auf der Warteliste und rückt automatisch nach, sobald genug "
                         "Teams für die nächste Stufe angemeldet sind.",
@@ -2218,12 +2310,12 @@ class TournamentCog(commands.Cog):
         elif action == "unregister":
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
 
             existing = await get_team_signup(tournament_id, team["id"])
             if not existing or existing["status"] == "withdrawn":
-                await interaction.response.send_message(embed=info_embed(f"{team['name']} ist nicht angemeldet."), ephemeral=True)
+                await interaction.response.send_message(view=info_embed(f"{team['name']} ist nicht angemeldet."), ephemeral=True)
                 return
 
             await pool.execute(
@@ -2231,41 +2323,41 @@ class TournamentCog(commands.Cog):
             )
             await reconcile_signups(tournament_id)
 
-            await interaction.response.send_message(embed=success_embed(f"👋 {team['name']} wurde abgemeldet."), ephemeral=True)
+            await interaction.response.send_message(view=success_embed(f"👋 {team['name']} wurde abgemeldet."), ephemeral=True)
             await refresh_panel(self.bot, tournament_id)
 
         elif action == "confirmactive":
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
-                await interaction.response.send_message(embed=error_embed("Du hast kein Team."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
                 return
             signup = await get_team_signup(tournament_id, team["id"])
             if not signup or signup["status"] != "registered":
                 await interaction.response.send_message(
-                    embed=warning_embed(f"{team['name']} ist nicht als registriert für dieses Turnier eingetragen."), ephemeral=True
+                    view=warning_embed(f"{team['name']} ist nicht als registriert für dieses Turnier eingetragen."), ephemeral=True
                 )
                 return
             await pool.execute(
                 "UPDATE tournament_signups SET confirmed_active = true WHERE id = $1", signup["id"]
             )
-            await interaction.response.send_message(embed=success_embed(f"{team['name']} ist als aktiv bestätigt!"), ephemeral=True)
+            await interaction.response.send_message(view=success_embed(f"{team['name']} ist als aktiv bestätigt!"), ephemeral=True)
             await refresh_panel(self.bot, tournament_id)
 
         elif action == "streamlink":
-            is_admin = interaction.user.guild_permissions.administrator
+            is_admin = await is_tournament_admin(interaction.user)
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not is_admin and not team:
-                await interaction.response.send_message(embed=error_embed("Nur Admins oder angemeldete Team-Manager können den Stream-Link ändern."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Nur Admins oder angemeldete Team-Manager können den Stream-Link ändern."), ephemeral=True)
                 return
             await interaction.response.send_modal(TournamentStreamLinkModal(tournament_id, t.get("stream_link")))
 
         elif action == "close":
-            if not interaction.user.guild_permissions.administrator:
-                await interaction.response.send_message(embed=error_embed("Nur Admins können die Anmeldung schließen."), ephemeral=True)
+            if not await is_tournament_admin(interaction.user):
+                await interaction.response.send_message(view=error_embed("Nur Admins können die Anmeldung schließen."), ephemeral=True)
                 return
             await pool.execute("UPDATE tournaments SET status = 'closed' WHERE id = $1", tournament_id)
             await interaction.response.send_message(
-                embed=success_embed("🔒 Anmeldung geschlossen", "Nutze das Admin-Panel um das Bracket zu erstellen."), ephemeral=True
+                view=success_embed("🔒 Anmeldung geschlossen", "Nutze das Admin-Panel um das Bracket zu erstellen."), ephemeral=True
             )
             await refresh_panel(self.bot, tournament_id)
 

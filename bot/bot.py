@@ -19,6 +19,8 @@ INITIAL_COGS = [
     "cogs.stats_manager",
     "cogs.moderation",
     "cogs.embed_builder",
+    "cogs.tickets",
+    "cogs.welcome",
     "cogs.admin_panel",
 ]
 

@@ -1,9 +1,11 @@
 """
-Gemeinsame Embed-Bausteine, damit alle Bot-Nachrichten (Erfolg/Fehler/Info)
-einheitlich im FIFA-Elite-Gold-Look aussehen, statt als reiner Text.
+Gemeinsame Components-V2-Bausteine, damit alle Bot-Nachrichten (Erfolg/Fehler/
+Info/Warnung) einheitlich und hochwertig aussehen - echte Container mit
+Akzentfarbe statt klassischer discord.Embed.
 
 Aufruf-Konvention: (titel, detailtext=None) - titel ist die kurze Kernaussage,
-detailtext optional fuer weitere Erklaerung.
+detailtext optional fuer weitere Erklaerung. Rueckgabe ist ein discord.ui.LayoutView,
+wird ueber view=... statt embed=... verschickt.
 """
 from __future__ import annotations
 import discord
@@ -14,17 +16,26 @@ GREEN = discord.Color.green()
 ORANGE = discord.Color.orange()
 
 
-def success_embed(title: str, detail: str | None = None) -> discord.Embed:
-    return discord.Embed(title=f"✅ {title}", description=detail, color=GREEN)
+def _build(icon: str, title: str, detail: str | None, color: discord.Color) -> discord.ui.LayoutView:
+    text = f"### {icon} {title}"
+    if detail:
+        text += f"\n{detail}"
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=color))
+    return view
 
 
-def error_embed(title: str, detail: str | None = None) -> discord.Embed:
-    return discord.Embed(title=f"⚠️ {title}", description=detail, color=RED)
+def success_embed(title: str, detail: str | None = None) -> discord.ui.LayoutView:
+    return _build("✅", title, detail, GREEN)
 
 
-def info_embed(title: str, detail: str | None = None) -> discord.Embed:
-    return discord.Embed(title=title, description=detail, color=GOLD)
+def error_embed(title: str, detail: str | None = None) -> discord.ui.LayoutView:
+    return _build("⚠️", title, detail, RED)
 
 
-def warning_embed(title: str, detail: str | None = None) -> discord.Embed:
-    return discord.Embed(title=f"🚫 {title}", description=detail, color=ORANGE)
+def info_embed(title: str, detail: str | None = None) -> discord.ui.LayoutView:
+    return _build("ℹ️", title, detail, GOLD)
+
+
+def warning_embed(title: str, detail: str | None = None) -> discord.ui.LayoutView:
+    return _build("🚫", title, detail, ORANGE)

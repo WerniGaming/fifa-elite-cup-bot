@@ -16,8 +16,11 @@ import io
 import logging
 import os
 
+import asyncpg
+
 from db import get_pool
 from ea_api import EAProClubsAPI
+from ui_helpers import success_embed, error_embed, info_embed, warning_embed
 
 log = logging.getLogger("fifa-elite-cup")
 
@@ -100,7 +103,7 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
         from cogs.moderation import get_active_ban, format_ban_reason
         ban = await get_active_ban(interaction.guild_id, interaction.user.id)
         if ban:
-            await interaction.followup.send(f"🚫 {format_ban_reason(ban)}", ephemeral=True)
+            await interaction.followup.send(view=warning_embed(format_ban_reason(ban)), ephemeral=True)
             return
 
         existing = await get_team_for_user(interaction.guild_id, interaction.user.id)
@@ -116,7 +119,7 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             async with EAProClubsAPI() as api:
                 results = await api.search_club(self.ea_club_name.value, PLATFORM_DEFAULT)
         except Exception as e:
-            await interaction.followup.send(f"❌ EA-API-Fehler: `{e}`. Bitte später erneut versuchen.", ephemeral=True)
+            await interaction.followup.send(view=error_embed("EA-API-Fehler", f"`{e}` - bitte später erneut versuchen."), ephemeral=True)
             return
 
         if not results:
@@ -143,10 +146,15 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
                 interaction.guild_id, ea_club_name, ea_club_id, ea_club_name,
                 PLATFORM_DEFAULT, self.stream_link.value or None, interaction.user.id,
             )
-        except Exception as e:
+        except asyncpg.UniqueViolationError:
             await interaction.followup.send(
-                f"❌ Konnte Team nicht anlegen (existiert der Name schon?): `{e}`", ephemeral=True
+                view=error_embed(f"Ein Team namens \"{ea_club_name}\" existiert auf diesem Server bereits.", "Team-Namen müssen eindeutig sein."),
+                ephemeral=True,
             )
+            return
+        except Exception:
+            log.exception("Fehler beim Anlegen eines Teams")
+            await interaction.followup.send(view=error_embed("Team konnte nicht angelegt werden."), ephemeral=True)
             return
 
         team_id = row["id"]
@@ -173,7 +181,7 @@ class EditFieldModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         pool = get_pool()
         await pool.execute(f"UPDATE teams SET {self.field} = $1 WHERE id = $2", self.value_input.value or None, self.team_id)
-        await interaction.response.send_message("✅ Aktualisiert.", ephemeral=True)
+        await interaction.response.send_message(view=success_embed("Aktualisiert."), ephemeral=True)
 
 
 # ---------- Ephemere Untermenüs ----------
@@ -191,10 +199,10 @@ class EAClubModal(discord.ui.Modal, title="EA Club verknüpfen"):
             async with EAProClubsAPI() as api:
                 results = await api.search_club(self.ea_club_name.value, PLATFORM_DEFAULT)
         except Exception as e:
-            await interaction.followup.send(f"❌ EA-API-Fehler: `{e}`", ephemeral=True)
+            await interaction.followup.send(view=error_embed("EA-API-Fehler", f"`{e}`"), ephemeral=True)
             return
         if not results:
-            await interaction.followup.send("Kein Club mit diesem Namen gefunden.", ephemeral=True)
+            await interaction.followup.send(view=error_embed("Kein Club mit diesem Namen gefunden."), ephemeral=True)
             return
         club = results[0]
         info = club.get("clubInfo", {})
@@ -206,7 +214,7 @@ class EAClubModal(discord.ui.Modal, title="EA Club verknüpfen"):
             "UPDATE teams SET ea_club_id = $1, ea_club_name = $2 WHERE id = $3",
             ea_club_id, ea_club_name, self.team_id,
         )
-        await interaction.followup.send(f"✅ Verknüpft mit **{ea_club_name}**.", ephemeral=True)
+        await interaction.followup.send(view=success_embed(f"Verknüpft mit {ea_club_name}"), ephemeral=True)
 
 
 class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
@@ -230,7 +238,7 @@ class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
     async def on_submit(self, interaction: discord.Interaction):
         values = getattr(self.file_upload, "values", None) or getattr(self.file_upload, "attachments", None) or []
         if not values:
-            await interaction.response.send_message("Kein Logo hochgeladen.", ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Kein Logo hochgeladen."), ephemeral=True)
             return
         attachment = values[0]
 
@@ -257,7 +265,7 @@ class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
             except discord.HTTPException:
                 storage_channel = None
         if storage_channel is None:
-            await interaction.followup.send("⚠️ Logo-Speicherkanal nicht gefunden. Bitte Admin kontaktieren.", ephemeral=True)
+            await interaction.followup.send(view=error_embed("Logo-Speicherkanal nicht gefunden.", "Bitte Admin kontaktieren."), ephemeral=True)
             return
 
         try:
@@ -269,11 +277,11 @@ class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
             permanent_url = permanent_msg.attachments[0].url
         except Exception:
             log.exception(f"Fehler beim dauerhaften Speichern des Logos fuer Team {self.team_id}")
-            await interaction.followup.send("⚠️ Logo konnte nicht gespeichert werden. Bitte erneut versuchen.", ephemeral=True)
+            await interaction.followup.send(view=error_embed("Logo konnte nicht gespeichert werden.", "Bitte erneut versuchen."), ephemeral=True)
             return
 
         await pool.execute("UPDATE teams SET logo_url = $1 WHERE id = $2", permanent_url, self.team_id)
-        await interaction.followup.send("✅ Logo aktualisiert!", ephemeral=True)
+        await interaction.followup.send(view=success_embed("Logo aktualisiert!"), ephemeral=True)
 
 
 class NotificationsView(discord.ui.View):
@@ -304,7 +312,7 @@ class NotificationsView(discord.ui.View):
         pool = get_pool()
         await pool.execute("UPDATE teams SET notifications_enabled = $1 WHERE id = $2", new_state, self.team["id"])
         state_text = "aktiviert" if new_state else "deaktiviert"
-        await interaction.response.send_message(f"Benachrichtigungen {state_text}.", ephemeral=True)
+        await interaction.response.send_message(view=success_embed(f"Benachrichtigungen {state_text}."), ephemeral=True)
 
 
 class CoManagerView(discord.ui.View):
@@ -322,9 +330,9 @@ class CoManagerView(discord.ui.View):
                 self.team["id"], user.id,
             )
         except Exception:
-            await interaction.response.send_message(f"{user.mention} ist bereits Manager dieses Teams.", ephemeral=True)
+            await interaction.response.send_message(view=warning_embed(f"{user.mention} ist bereits Manager dieses Teams."), ephemeral=True)
             return
-        await interaction.response.send_message(f"✅ {user.mention} ist jetzt Co-Manager von **{self.team['name']}**.", ephemeral=True)
+        await interaction.response.send_message(view=success_embed(f"{user.mention} ist jetzt Co-Manager von {self.team['name']}"), ephemeral=True)
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Co-Manager entfernen")
     async def remove_comanager(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
@@ -332,10 +340,10 @@ class CoManagerView(discord.ui.View):
         pool = get_pool()
         role = await get_role_for_user(self.team["id"], user.id)
         if role == "owner":
-            await interaction.response.send_message("Der Team-Owner kann hier nicht entfernt werden.", ephemeral=True)
+            await interaction.response.send_message(view=warning_embed("Der Team-Owner kann hier nicht entfernt werden."), ephemeral=True)
             return
         await pool.execute("DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2", self.team["id"], user.id)
-        await interaction.response.send_message(f"✅ {user.mention} wurde entfernt.", ephemeral=True)
+        await interaction.response.send_message(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
 
 
 class LeaveConfirmView(discord.ui.View):
@@ -444,6 +452,163 @@ class TeamManagerCog(commands.Cog):
         panel = TeamManagerPanel()
         await interaction.response.send_message(view=panel, files=[panel.banner_file])
 
+    @app_commands.command(name="club_stats", description="Zeigt EA-Club-Statistiken eines Teams: letzte Friendlys, Liga, Kader")
+    @app_commands.describe(team="Name des Teams (auf diesem Server)")
+    async def club_stats(self, interaction: discord.Interaction, team: str):
+        await interaction.response.defer(thinking=True)
+        pool = get_pool()
+        row = await pool.fetchrow(
+            "SELECT * FROM teams WHERE guild_id = $1 AND LOWER(name) = LOWER($2)", interaction.guild_id, team
+        )
+        if not row:
+            await interaction.followup.send(view=error_embed(f'Kein Team namens "{team}" gefunden.'))
+            return
+        if not row["ea_club_id"]:
+            await interaction.followup.send(view=error_embed(f'{row["name"]} hat keinen verknüpften EA-Club.'))
+            return
+
+        club_id = row["ea_club_id"]
+        platform = row["ea_platform"] or PLATFORM_DEFAULT
+
+        club_info, seasonal, matches, members = {}, {}, [], []
+        async with EAProClubsAPI() as api:
+            try:
+                club_info = await api.get_club_info(club_id, platform)
+            except Exception:
+                log.warning(f"get_club_info fehlgeschlagen fuer Team {row['id']}", exc_info=True)
+            try:
+                seasonal = await api.get_seasonal_stats(club_id, platform)
+            except Exception:
+                log.warning(f"get_seasonal_stats fehlgeschlagen fuer Team {row['id']}", exc_info=True)
+            try:
+                matches = await api.get_matches(club_id, platform, "friendlyMatch", max_results=5)
+            except Exception:
+                log.warning(f"get_matches fehlgeschlagen fuer Team {row['id']}", exc_info=True)
+            try:
+                members = await api.get_members(club_id, platform)
+            except Exception:
+                log.warning(f"get_members fehlgeschlagen fuer Team {row['id']}", exc_info=True)
+
+        cup_stats = await pool.fetchrow(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM tournaments WHERE winner_champion_id = $1) AS cup_titles,
+              (SELECT COUNT(*) FROM tournaments WHERE loser_champion_id = $1) AS loser_bracket_titles,
+              (SELECT COUNT(*) FROM tournaments WHERE winner_bracket_third_id = $1) AS third_places,
+              COUNT(*) FILTER (WHERE tm.winner_id = $1) AS wins,
+              COUNT(*) FILTER (WHERE tm.winner_id IS NULL AND tm.status = 'completed') AS draws,
+              COUNT(*) FILTER (WHERE tm.status = 'completed' AND tm.winner_id IS NOT NULL AND tm.winner_id != $1) AS losses,
+              COALESCE(SUM(CASE WHEN tm.team1_id = $1 THEN tm.team1_score WHEN tm.team2_id = $1 THEN tm.team2_score ELSE 0 END), 0) AS goals_for,
+              COALESCE(SUM(CASE WHEN tm.team1_id = $1 THEN tm.team2_score WHEN tm.team2_id = $1 THEN tm.team1_score ELSE 0 END), 0) AS goals_against
+            FROM tournament_matches tm
+            WHERE (tm.team1_id = $1 OR tm.team2_id = $1) AND tm.status = 'completed'
+            """,
+            row["id"],
+        )
+
+        if not club_info and not matches and not members:
+            await interaction.followup.send(view=error_embed("EA-API gerade nicht erreichbar. Später erneut versuchen."))
+            return
+
+        items = [discord.ui.TextDisplay(f"# 📊 {row['name']}\nEA-Club: **{row['ea_club_name'] or '?'}**")]
+
+        division = seasonal.get("bestDivision") or seasonal.get("currentDivision") or seasonal.get("division")
+        league_points = seasonal.get("leaguePoints") or seasonal.get("skillRating")
+        cup_has_data = cup_stats and (cup_stats["wins"] or cup_stats["draws"] or cup_stats["losses"])
+
+        if division or league_points or cup_has_data:
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
+            block = ["### 🏆 Titel & Liga"]
+            if division:
+                block.append(f"Division `{division}`" + (f" · `{league_points}` Punkte" if league_points else ""))
+            if cup_has_data:
+                medals = []
+                if cup_stats["cup_titles"]:
+                    medals.append(f"🥇 `{cup_stats['cup_titles']}×` Turniersieger")
+                if cup_stats["loser_bracket_titles"]:
+                    medals.append(f"🥈 `{cup_stats['loser_bracket_titles']}×` Loser-Bracket-Sieger")
+                if cup_stats["third_places"]:
+                    medals.append(f"🥉 `{cup_stats['third_places']}×` Dritter")
+                block += medals
+                goal_diff = cup_stats["goals_for"] - cup_stats["goals_against"]
+                block.append(f"Bilanz: `{cup_stats['wins']}S {cup_stats['draws']}U {cup_stats['losses']}N`")
+                block.append(f"Tore: `{cup_stats['goals_for']}:{cup_stats['goals_against']}` (Diff. `{goal_diff:+d}`)")
+            items.append(discord.ui.TextDisplay("\n".join(block)))
+
+        player_totals: dict[str, dict] = {}
+        friendly_lines = []
+        for m in matches[:5]:
+            clubs = m.get("clubs", {})
+            club_ids = list(clubs.keys())
+            if len(club_ids) < 2:
+                continue
+            opponent_id = club_ids[0] if club_ids[1] == str(club_id) else club_ids[1]
+            my_goals = clubs.get(str(club_id), {}).get("goals", "?")
+            opp_goals = clubs.get(opponent_id, {}).get("goals", "?")
+            opp_name = clubs.get(opponent_id, {}).get("details", {}).get("name", "Unbekannt")
+            friendly_lines.append(f"`{my_goals}:{opp_goals}` vs. {opp_name}")
+
+            club_players = m.get("players", {}).get(str(club_id))
+            if club_players:
+                for player_id, p in club_players.items():
+                    name = p.get("playername") or p.get("proName") or f"Player {player_id}"
+                    if player_id not in player_totals:
+                        player_totals[player_id] = {"name": name, "matches": 0, "goals": 0, "assists": 0, "rating_sum": 0.0}
+                    entry = player_totals[player_id]
+                    entry["matches"] += 1
+                    entry["goals"] += int(p.get("goals") or 0)
+                    entry["assists"] += int(p.get("assists") or 0)
+                    try:
+                        entry["rating_sum"] += float(p.get("rating") or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+        if friendly_lines:
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
+            items.append(discord.ui.TextDisplay("### ⚽ Letzte Friendlys\n" + "\n".join(friendly_lines)))
+
+        if player_totals:
+            medals = ["🥇", "🥈", "🥉"]
+            sorted_players = sorted(player_totals.values(), key=lambda p: p["goals"], reverse=True)
+            block = [
+                "### 🎮 Spieler dieser Friendlys",
+                "-# Nur Spieler, die in den letzten 5 Freundschaftsspielen mitgespielt haben",
+                "",
+            ]
+            for i, p in enumerate(sorted_players):
+                prefix = medals[i] if i < 3 else f"`{i + 1}.`"
+                block.append(f"{prefix} **{p['name']}** — `{p['goals']}` ⚽ `{p['assists']}` 🅰️ · Ø `{p['rating_sum'] / p['matches']:.1f}`")
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
+            items.append(discord.ui.TextDisplay("\n".join(block)))
+
+        if members:
+            sorted_members = sorted(members, key=lambda p: float(p.get("proOverallRating", 0) or 0), reverse=True)
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
+            names = [p.get("name", "?") for p in sorted_members]
+            block = [f"### 👥 Kader (`{len(names)}`)", ""]
+            chunk_lines = []
+            char_count = 0
+            for name in names:
+                chunk_lines.append(f"`{name}`")
+                char_count += len(name) + 3
+                if char_count > 3500:
+                    break
+            block.append(" · ".join(chunk_lines))
+            items.append(discord.ui.TextDisplay("\n".join(block)))
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
+        await interaction.followup.send(view=view)
+
+    @club_stats.autocomplete("team")
+    async def club_stats_autocomplete(self, interaction: discord.Interaction, current: str):
+        pool = get_pool()
+        rows = await pool.fetch(
+            "SELECT name FROM teams WHERE guild_id = $1 AND name ILIKE $2 ORDER BY name LIMIT 25",
+            interaction.guild_id, f"%{current}%",
+        )
+        return [app_commands.Choice(name=r["name"], value=r["name"]) for r in rows]
+
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
@@ -485,9 +650,9 @@ class TeamManagerCog(commands.Cog):
         elif action == "comanager":
             role = await get_role_for_user(team["id"], interaction.user.id)
             if role != "owner":
-                await interaction.response.send_message("Nur der Vereinsmanager kann Co-Manager verwalten.", ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Nur der Vereinsmanager kann Co-Manager verwalten."), ephemeral=True)
                 return
-            await interaction.response.send_message("Co-Manager verwalten:", view=CoManagerView(team), ephemeral=True)
+            await interaction.response.send_message(content="Co-Manager verwalten:", view=CoManagerView(team), ephemeral=True)
 
         elif action == "notifications":
             await interaction.response.send_message(

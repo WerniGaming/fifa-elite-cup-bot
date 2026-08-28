@@ -14,6 +14,7 @@ import discord
 from discord.ext import commands
 
 from db import get_pool
+from ui_helpers import success_embed, error_embed, info_embed, warning_embed
 from cogs.team_manager import get_team_managers
 from cogs.tournament_manager import reconcile_signups, refresh_panel
 
@@ -156,7 +157,7 @@ class BanReasonModal(discord.ui.Modal):
                 days = int(self.duration_days.value.strip())
                 expires_at = datetime.now(timezone.utc) + timedelta(days=days)
             except ValueError:
-                await interaction.response.send_message("Dauer muss eine Zahl (Tage) sein.", ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Dauer muss eine Zahl (Tage) sein."), ephemeral=True)
                 return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -240,7 +241,7 @@ class BanReasonModal(discord.ui.Modal):
                 f"**Von:** <@{interaction.user.id}>"
             )
 
-        await interaction.followup.send(f"🔨 **{self.target_label}** wurde gesperrt ({until_text}).", ephemeral=True)
+        await interaction.followup.send(view=success_embed(f"{self.target_label} wurde gesperrt", f"Dauer: {until_text}"), ephemeral=True)
 
 
 # ---------- Auswahl-Views ----------
@@ -294,7 +295,7 @@ class UnbanSelect(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         value = interaction.data["values"][0]
         if value == "none":
-            await interaction.response.send_message("Niemand zu entsperren.", ephemeral=True)
+            await interaction.response.send_message(view=info_embed("Niemand zu entsperren."), ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -316,7 +317,7 @@ class UnbanSelect(discord.ui.View):
             if log_channel:
                 await log_channel.send(f"✅ **Spieler entsperrt:** <@{target_id}> - von <@{interaction.user.id}>")
 
-            await interaction.followup.send(f"✅ <@{target_id}> wurde entsperrt.", ephemeral=True)
+            await interaction.followup.send(view=success_embed(f"<@{target_id}> wurde entsperrt."), ephemeral=True)
         else:
             await pool.execute(
                 "DELETE FROM banned_teams WHERE guild_id = $1 AND team_id = $2", interaction.guild_id, target_id
@@ -334,7 +335,7 @@ class UnbanSelect(discord.ui.View):
             if log_channel:
                 await log_channel.send(f"✅ **Team entsperrt:** {team_name} - von <@{interaction.user.id}>")
 
-            await interaction.followup.send(f"✅ **{team_name}** wurde entsperrt.", ephemeral=True)
+            await interaction.followup.send(view=success_embed(f"{team_name} wurde entsperrt."), ephemeral=True)
 
 
 class ModerationCog(commands.Cog):

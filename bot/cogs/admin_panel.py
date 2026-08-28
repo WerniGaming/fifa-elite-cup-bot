@@ -46,6 +46,7 @@ from cogs.moderation import (
     get_all_bans, get_all_team_bans, get_all_guild_teams,
 )
 from cogs.team_manager import get_team_managers
+from permissions import is_tournament_admin
 from cogs.embed_builder import EmbedBuilderModal
 
 log = logging.getLogger("fifa-elite-cup")
@@ -74,14 +75,16 @@ class TournamentSelect(discord.ui.View):
         tournament_id = int(interaction.data["values"][0])
         t = await get_tournament(tournament_id)
         if not t:
-            await interaction.response.send_message(embed=error_embed("Turnier nicht gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Turnier nicht gefunden."), ephemeral=True)
             return
         registered, waitlist = await get_signup_counts(tournament_id)
-        embed = info_embed(f"{t['name']} (ID {t['id']})")
-        embed.add_field(name="Status", value=status_label(t), inline=True)
-        embed.add_field(name="Min/Max Teams", value=f"{t['min_teams']} / {t['max_teams']}", inline=True)
-        embed.add_field(name="Angemeldet", value=f"{registered} | Warteliste: {waitlist}", inline=True)
-        await interaction.response.send_message(embed=embed, view=TournamentAdminView(t), ephemeral=True)
+        summary = (
+            f"### {t['name']} (ID `{t['id']}`)\n"
+            f"**Status:** {status_label(t)}\n"
+            f"**Min/Max Teams:** `{t['min_teams']}` / `{t['max_teams']}`\n"
+            f"**Angemeldet:** `{registered}` · Warteliste: `{waitlist}`"
+        )
+        await interaction.response.send_message(content=summary, view=TournamentAdminView(t), ephemeral=True)
 
 
 class ActivityOverrideView(discord.ui.View):
@@ -98,12 +101,12 @@ class ActivityOverrideView(discord.ui.View):
         await refresh_panel(interaction.client, self.tournament_id)
         await start_group_phase(interaction.client, interaction.guild, self.tournament_id, t)
         await interaction.followup.send(
-            embed=success_embed(f"{t['name']} wurde ohne vollständigen Aktivitätscheck gestartet."), ephemeral=True
+            view=success_embed(f"{t['name']} wurde ohne vollständigen Aktivitätscheck gestartet."), ephemeral=True
         )
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+        await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
 
 
 class EditMatchSelectView(discord.ui.View):
@@ -128,7 +131,7 @@ class EditMatchSelectView(discord.ui.View):
         match_id = int(interaction.data["values"][0])
         match = self.matches_by_id.get(match_id)
         if not match:
-            await interaction.response.send_message(embed=error_embed("Match nicht gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Match nicht gefunden."), ephemeral=True)
             return
         await interaction.response.send_modal(
             ScoreModal(
@@ -138,6 +141,83 @@ class EditMatchSelectView(discord.ui.View):
                 default_score1=match["team1_score"], default_score2=match["team2_score"],
             )
         )
+
+
+class AdminRoleSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        select = discord.ui.RoleSelect(placeholder="Neue Admin-Rolle wählen...")
+        select.callback = self.on_select
+        self.add_item(select)
+
+    @discord.ui.button(label="Entfernen (nur echte Admins)", style=discord.ButtonStyle.danger, row=1)
+    async def remove_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, admin_role_id) VALUES ($1, NULL) "
+            "ON CONFLICT (guild_id) DO UPDATE SET admin_role_id = NULL",
+            interaction.guild_id,
+        )
+        await interaction.response.edit_message(
+            view=success_embed("Admin-Rolle entfernt", "Nur noch echte Server-Administratoren haben Zugriff.")
+        )
+
+    async def on_select(self, interaction: discord.Interaction):
+        role_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, admin_role_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET admin_role_id = $2",
+            interaction.guild_id, role_id,
+        )
+        await interaction.response.edit_message(
+            view=success_embed("Admin-Rolle gesetzt", f"<@&{role_id}> kann jetzt zusätzlich zu echten Admins das Admin-Panel nutzen."),
+        )
+
+
+class TicketConfigView(discord.ui.View):
+    """Konfiguration fuers Ticket-System: Kategorie, Log-Kanal, Support-Rolle - je ein Select."""
+
+    def __init__(self):
+        super().__init__(timeout=300)
+
+        category_select = discord.ui.ChannelSelect(
+            placeholder="Kategorie für neue Ticket-Kanäle wählen...", channel_types=[discord.ChannelType.category]
+        )
+        category_select.callback = self._make_channel_callback("ticket_category_id", "Ticket-Kategorie")
+        self.add_item(category_select)
+
+        log_select = discord.ui.ChannelSelect(
+            placeholder="Log-Kanal für Transkripte wählen...", channel_types=[discord.ChannelType.text]
+        )
+        log_select.callback = self._make_channel_callback("ticket_log_channel_id", "Ticket-Log")
+        self.add_item(log_select)
+
+        role_select = discord.ui.RoleSelect(placeholder="Support-Rolle wählen (kann Tickets sehen/übernehmen/schließen)...")
+        role_select.callback = self._role_callback
+        self.add_item(role_select)
+
+    def _make_channel_callback(self, field_name: str, label: str):
+        async def callback(interaction: discord.Interaction):
+            channel_id = int(interaction.data["values"][0])
+            pool = get_pool()
+            await pool.execute(
+                f"INSERT INTO guild_settings (guild_id, {field_name}) VALUES ($1, $2) "
+                f"ON CONFLICT (guild_id) DO UPDATE SET {field_name} = $2",
+                interaction.guild_id, channel_id,
+            )
+            await interaction.response.send_message(view=success_embed(f"{label} gesetzt", f"<#{channel_id}>"), ephemeral=True)
+        return callback
+
+    async def _role_callback(self, interaction: discord.Interaction):
+        role_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, ticket_support_role_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET ticket_support_role_id = $2",
+            interaction.guild_id, role_id,
+        )
+        await interaction.response.send_message(view=success_embed("Support-Rolle gesetzt", f"<@&{role_id}>"), ephemeral=True)
 
 
 class ResetKoConfirmView(discord.ui.View):
@@ -152,11 +232,11 @@ class ResetKoConfirmView(discord.ui.View):
             await reset_knockout_phase(interaction.client, interaction.guild, self.tournament_id)
             t = await get_tournament(self.tournament_id)
             await start_knockout_phase(interaction.client, interaction.guild, self.tournament_id, t)
-            await interaction.followup.send(embed=success_embed("KO-Phase wurde zurückgesetzt und neu erstellt."), ephemeral=True)
+            await interaction.followup.send(view=success_embed("KO-Phase wurde zurückgesetzt und neu erstellt."), ephemeral=True)
         except Exception:
             log.exception(f"Fehler beim Zuruecksetzen/Neuerstellen der KO-Phase fuer Turnier {self.tournament_id}")
             await interaction.followup.send(
-                embed=error_embed(
+                view=error_embed(
                     "Fehler beim Zurücksetzen",
                     "Bitte im Bot-Log nachschauen (`sudo journalctl -u fifa-elite-cup-v2 -n 50 --no-pager`).",
                 ),
@@ -165,7 +245,50 @@ class ResetKoConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+        await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
+
+
+class DonationConfigModal(discord.ui.Modal, title="Spendenturnier einrichten"):
+    donation_info = discord.ui.TextInput(
+        label="Zahlungsdetails (PayPal/IBAN/etc.)", style=discord.TextStyle.paragraph, required=True, max_length=1000
+    )
+
+    def __init__(self, tournament_id: int):
+        super().__init__()
+        self.tournament_id = tournament_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        pool = get_pool()
+        await pool.execute(
+            "UPDATE tournaments SET is_donation_tournament = true, donation_info = $1 WHERE id = $2",
+            self.donation_info.value, self.tournament_id,
+        )
+        await interaction.response.send_message(
+            view=success_embed(
+                "Spendenturnier aktiviert",
+                "Ab jetzt bekommt jedes neu angemeldete Team automatisch einen privaten Zahlungs-Kanal mit diesen Details.",
+            ),
+            ephemeral=True,
+        )
+
+
+class DonationDeactivateView(discord.ui.View):
+    def __init__(self, tournament_id: int):
+        super().__init__(timeout=120)
+        self.tournament_id = tournament_id
+
+    @discord.ui.button(label="Zahlungsdetails ändern", style=discord.ButtonStyle.secondary)
+    async def edit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DonationConfigModal(self.tournament_id))
+
+    @discord.ui.button(label="Spendenturnier deaktivieren", style=discord.ButtonStyle.danger)
+    async def deactivate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        pool = get_pool()
+        await pool.execute("UPDATE tournaments SET is_donation_tournament = false WHERE id = $1", self.tournament_id)
+        await interaction.response.edit_message(
+            content="Spendenturnier-Funktion deaktiviert. Neue Anmeldungen lösen keinen Zahlungs-Kanal mehr aus.",
+            view=None,
+        )
 
 
 class SwapOutSelectView(discord.ui.View):
@@ -184,7 +307,7 @@ class SwapOutSelectView(discord.ui.View):
         team_id = int(interaction.data["values"][0])
         team_name = self.team_names.get(team_id, f"Team {team_id}")
         await interaction.response.send_message(
-            embed=info_embed(f"{team_name} austauschen — wie?"),
+            content=f"**{team_name}** austauschen — wie?",
             view=SwapActionChoiceView(self.tournament_id, team_id, team_name),
             ephemeral=True,
         )
@@ -202,18 +325,17 @@ class SwapActionChoiceView(discord.ui.View):
         await swap_team_for_bye(self.tournament_id, self.team_id)
         await refresh_panel(interaction.client, self.tournament_id)
         await interaction.response.edit_message(
-            content=None, embed=success_embed(f"{self.team_name} wurde entfernt, der Platz bleibt frei (Freilos)."), view=None
+            content=None, view=success_embed(f"{self.team_name} wurde entfernt, der Platz bleibt frei (Freilos).")
         )
 
     @discord.ui.button(label="Durch Warteliste ersetzen", style=discord.ButtonStyle.primary)
     async def to_waitlist_swap(self, interaction: discord.Interaction, button: discord.ui.Button):
         waitlist = await get_waitlisted_teams(self.tournament_id)
         if not waitlist:
-            await interaction.response.edit_message(content=None, embed=warning_embed("Die Warteliste ist aktuell leer."), view=None)
+            await interaction.response.edit_message(content=None, view=warning_embed("Die Warteliste ist aktuell leer."))
             return
         await interaction.response.edit_message(
-            content=None,
-            embed=info_embed(f"Welches Warteliste-Team soll {self.team_name} ersetzen?"),
+            content=f"Welches Warteliste-Team soll **{self.team_name}** ersetzen?",
             view=SwapInSelectView(self.tournament_id, self.team_id, self.team_name, waitlist),
         )
 
@@ -236,7 +358,7 @@ class SwapInSelectView(discord.ui.View):
         await swap_team_for_waitlisted(self.tournament_id, self.team_id_out, team_id_in)
         await refresh_panel(interaction.client, self.tournament_id)
         await interaction.response.edit_message(
-            content=None, embed=success_embed(f"{self.team_out_name} wurde durch {team_in_name} ersetzt."), view=None
+            content=None, view=success_embed(f"{self.team_out_name} wurde durch {team_in_name} ersetzt.")
         )
 
 
@@ -258,12 +380,12 @@ class EndTournamentConfirmView(discord.ui.View):
         await cleanup_tournament_channels(interaction.client, interaction.guild, self.tournament_id)
         await pool.execute("UPDATE tournaments SET status = 'finished' WHERE id = $1", self.tournament_id)
         await interaction.followup.send(
-            embed=success_embed("Turnier beendet", "Statistiken gepostet, Kanäle/Rollen aufgeräumt."), ephemeral=True
+            view=success_embed("Turnier beendet", "Statistiken gepostet, Kanäle/Rollen aufgeräumt."), ephemeral=True
         )
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+        await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
 
 
 class TournamentAdminView(discord.ui.View):
@@ -295,7 +417,7 @@ class TournamentAdminView(discord.ui.View):
                     pass
 
         await interaction.followup.send(
-            embed=success_embed("Anmeldung geschlossen", "Teams wurden per DM zum Aktivitätscheck aufgefordert."),
+            view=success_embed("Anmeldung geschlossen", "Teams wurden per DM zum Aktivitätscheck aufgefordert."),
             ephemeral=True,
         )
 
@@ -304,7 +426,7 @@ class TournamentAdminView(discord.ui.View):
         t = await get_tournament(self.t["id"])
         if t.get("phase") != "signup":
             await interaction.response.send_message(
-                embed=error_embed(
+                view=error_embed(
                     "Nicht möglich",
                     "Die Anmeldung kann nur wieder geöffnet werden, solange das Turnier noch nicht in der Gruppenphase ist.",
                 ),
@@ -314,19 +436,19 @@ class TournamentAdminView(discord.ui.View):
         pool = get_pool()
         await pool.execute("UPDATE tournaments SET status = 'open' WHERE id = $1", self.t["id"])
         await refresh_panel(interaction.client, self.t["id"])
-        await interaction.response.send_message(embed=success_embed("Anmeldung wieder geöffnet."), ephemeral=True)
+        await interaction.response.send_message(view=success_embed("Anmeldung wieder geöffnet."), ephemeral=True)
 
     @discord.ui.button(label="Gruppenphase starten", style=discord.ButtonStyle.success)
     async def start_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         t = await get_tournament(self.t["id"])
         if t["status"] in ("started",) or t.get("phase") not in ("signup",):
-            await interaction.followup.send(embed=error_embed("Dieses Turnier läuft bereits."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Dieses Turnier läuft bereits."), ephemeral=True)
             return
         registered, _ = await get_signup_counts(self.t["id"])
         if registered < 2:
             await interaction.followup.send(
-                embed=error_embed(
+                view=error_embed(
                     "Zu wenige Teams",
                     f"({registered}) angemeldet. Es werden mindestens 2 Teams benötigt "
                     "(fehlende Plätze bis zur Turnierstufe werden automatisch als Freilose aufgefüllt).",
@@ -339,10 +461,10 @@ class TournamentAdminView(discord.ui.View):
         if unconfirmed:
             names = ", ".join(u["name"] for u in unconfirmed)
             await interaction.followup.send(
-                embed=warning_embed(
-                    f"{len(unconfirmed)} Team(s) noch nicht aktiv gemeldet",
-                    f"{names}\n\nNormalerweise sollten erst alle Teams bestätigen ('✅ Team ist da' im Panel). "
-                    "Du kannst trotzdem starten, falls nötig:",
+                content=(
+                    f"🚫 **{len(unconfirmed)} Team(s) noch nicht aktiv gemeldet:** {names}\n\n"
+                    "Normalerweise sollten erst alle Teams bestätigen ('✅ Team ist da' im Panel). "
+                    "Du kannst trotzdem starten, falls nötig:"
                 ),
                 view=ActivityOverrideView(self.t["id"]),
                 ephemeral=True,
@@ -358,7 +480,7 @@ class TournamentAdminView(discord.ui.View):
         await refresh_panel(interaction.client, self.t["id"])
         await start_group_phase(interaction.client, interaction.guild, self.t["id"], t)
         await interaction.followup.send(
-            embed=success_embed(f"{t['name']} gestartet!", "Gruppenkanäle wurden angelegt."), ephemeral=True
+            view=success_embed(f"{t['name']} gestartet!", "Gruppenkanäle wurden angelegt."), ephemeral=True
         )
 
     @discord.ui.button(label="KO-Phase starten", style=discord.ButtonStyle.success)
@@ -372,19 +494,19 @@ class TournamentAdminView(discord.ui.View):
         )
         if existing_brackets > 0:
             await interaction.followup.send(
-                embed=error_embed("KO-Phase bereits gestartet", "Bracket-Kanäle existieren schon."), ephemeral=True
+                view=error_embed("KO-Phase bereits gestartet", "Bracket-Kanäle existieren schon."), ephemeral=True
             )
             return
 
         if t.get("phase") not in ("groups", "knockout"):
             await interaction.followup.send(
-                embed=error_embed("Nicht möglich", "Die KO-Phase kann erst gestartet werden, wenn die Gruppenphase läuft."),
+                view=error_embed("Nicht möglich", "Die KO-Phase kann erst gestartet werden, wenn die Gruppenphase läuft."),
                 ephemeral=True,
             )
             return
         if not await all_groups_complete(self.t["id"]):
             await interaction.followup.send(
-                embed=warning_embed(
+                view=warning_embed(
                     "Noch nicht alle Spiele abgeschlossen",
                     "Erst wenn alle Ergebnisse eingetragen sind, kann die KO-Phase gestartet werden "
                     "(das passiert normalerweise automatisch mit dem letzten Ergebnis).",
@@ -398,19 +520,18 @@ class TournamentAdminView(discord.ui.View):
             t = await get_tournament(self.t["id"])
 
         await start_knockout_phase(interaction.client, interaction.guild, self.t["id"], t)
-        await interaction.followup.send(embed=success_embed("KO-Phase gestartet!"), ephemeral=True)
+        await interaction.followup.send(view=success_embed("KO-Phase gestartet!"), ephemeral=True)
 
     @discord.ui.button(label="KO-Phase resetten", style=discord.ButtonStyle.danger)
     async def reset_ko_phase(self, interaction: discord.Interaction, button: discord.ui.Button):
         t = await get_tournament(self.t["id"])
         if t.get("phase") not in ("knockout",):
-            await interaction.response.send_message(embed=error_embed("Es gibt aktuell keine KO-Phase zum Zurücksetzen."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Es gibt aktuell keine KO-Phase zum Zurücksetzen."), ephemeral=True)
             return
         await interaction.response.send_message(
-            embed=warning_embed(
-                "Sicher?",
-                "Löscht alle Winner-/Loser-Bracket-Kanäle, -Rollen und -Matches unwiderruflich und setzt das "
-                "Turnier zurück auf die Gruppenphase (Gruppen bleiben unangetastet).",
+            content=(
+                "⚠️ **Sicher?** Löscht alle Winner-/Loser-Bracket-Kanäle, -Rollen und -Matches unwiderruflich und "
+                "setzt das Turnier zurück auf die Gruppenphase (Gruppen bleiben unangetastet)."
             ),
             view=ResetKoConfirmView(self.t["id"]),
             ephemeral=True,
@@ -422,7 +543,7 @@ class TournamentAdminView(discord.ui.View):
         pool = get_pool()
         groups = await pool.fetch("SELECT * FROM tournament_groups WHERE tournament_id = $1 ORDER BY group_number", self.t["id"])
         if not groups:
-            await interaction.followup.send(embed=error_embed("Keine Gruppen gefunden (Gruppenphase noch nicht gestartet?)."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Keine Gruppen gefunden (Gruppenphase noch nicht gestartet?)."), ephemeral=True)
             return
 
         from graphics import generate_group_schedule_images
@@ -467,15 +588,27 @@ class TournamentAdminView(discord.ui.View):
                 failed += 1
 
         await interaction.followup.send(
-            embed=success_embed("Spielplan-Grafiken gepostet", f"Erfolgreich: {posted} | Fehlgeschlagen: {failed}"), ephemeral=True
+            view=success_embed("Spielplan-Grafiken gepostet", f"Erfolgreich: {posted} | Fehlgeschlagen: {failed}"), ephemeral=True
         )
+
+    @discord.ui.button(label="Spendenturnier einrichten", style=discord.ButtonStyle.secondary)
+    async def setup_donation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = await get_tournament(self.t["id"])
+        if t.get("is_donation_tournament"):
+            await interaction.response.send_message(
+                content=f"**Bereits als Spendenturnier aktiv.**\nAktuelle Zahlungsdetails:\n{t.get('donation_info') or '-'}",
+                view=DonationDeactivateView(self.t["id"]),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(DonationConfigModal(self.t["id"]))
 
     @discord.ui.button(label="Team tauschen", style=discord.ButtonStyle.secondary)
     async def swap_team(self, interaction: discord.Interaction, button: discord.ui.Button):
         t = await get_tournament(self.t["id"])
         if t.get("phase") != "signup":
             await interaction.response.send_message(
-                embed=error_embed(
+                view=error_embed(
                     "Nicht möglich",
                     "Team-Tausch ist nur möglich, solange sich das Turnier noch in der Anmeldephase befindet "
                     "(vor Gruppenphasen-Start).",
@@ -485,10 +618,10 @@ class TournamentAdminView(discord.ui.View):
             return
         registered = await get_registered_teams(self.t["id"])
         if not registered:
-            await interaction.response.send_message(embed=error_embed("Keine registrierten Teams vorhanden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Keine registrierten Teams vorhanden."), ephemeral=True)
             return
         await interaction.response.send_message(
-            embed=info_embed("Welches Team soll ausgetauscht werden?"),
+            content="Welches Team soll ausgetauscht werden?",
             view=SwapOutSelectView(self.t["id"], registered),
             ephemeral=True,
         )
@@ -497,30 +630,28 @@ class TournamentAdminView(discord.ui.View):
     async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         registered = await get_registered_teams(self.t["id"])
         waitlist = await get_waitlisted_teams(self.t["id"])
-        embed = info_embed("Teams")
-        embed.add_field(
-            name=f"Angemeldet ({len(registered)})",
-            value="\n".join(f"- {r['name']}" for r in registered) or "- (keine)",
-            inline=False,
-        )
+        blocks = [f"### Teams\n**Angemeldet ({len(registered)}):**\n" + ("\n".join(f"- {r['name']}" for r in registered) or "- (keine)")]
         if waitlist:
-            embed.add_field(name=f"Warteliste ({len(waitlist)})", value="\n".join(f"- {r['name']}" for r in waitlist), inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            blocks.append(f"**Warteliste ({len(waitlist)}):**\n" + "\n".join(f"- {r['name']}" for r in waitlist))
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n\n".join(blocks)), accent_color=discord.Color.gold()))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @discord.ui.button(label="Gruppen-Status", style=discord.ButtonStyle.secondary)
     async def show_group_status(self, interaction: discord.Interaction, button: discord.ui.Button):
         t = await get_tournament(self.t["id"])
         if t.get("phase") not in ("groups", "knockout", "finished"):
-            await interaction.response.send_message(embed=error_embed("Für dieses Turnier wurde noch keine Gruppenphase gestartet."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Für dieses Turnier wurde noch keine Gruppenphase gestartet."), ephemeral=True)
             return
 
         standings = await get_group_standings(self.t["id"])
         pool = get_pool()
-        embed = info_embed(f"{t['name']} - Gruppenphase")
+        blocks = [f"### {t['name']} - Gruppenphase"]
         for g in standings:
             team_ids = [s["team_id"] for s in g["standings"]]
             names = await team_name_map(team_ids)
-            table_lines = [f"{names.get(s['team_id'], '?')}: {s['wins']} Siege" for s in g["standings"]]
+            table_lines = [f"**Gruppe {g['group_number']}**"]
+            table_lines += [f"{names.get(s['team_id'], '?')}: `{s['wins']}` Siege" for s in g["standings"]]
 
             matches = await pool.fetch(
                 "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", g["group_id"]
@@ -528,24 +659,30 @@ class TournamentAdminView(discord.ui.View):
             open_matches = [m for m in matches if m["status"] != "completed"]
             if open_matches:
                 m_names = await team_name_map([m["team1_id"] for m in open_matches] + [m["team2_id"] for m in open_matches])
-                table_lines.append("")
                 table_lines.append("Offen:")
                 table_lines += [
                     f"ST{m['round']}: {m_names.get(m['team1_id'],'?')} vs {m_names.get(m['team2_id'],'?')}" for m in open_matches
                 ]
-            embed.add_field(name=f"Gruppe {g['group_number']}", value="\n".join(table_lines) or "-", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            blocks.append("\n".join(table_lines))
+
+        view = discord.ui.LayoutView(timeout=None)
+        items = [discord.ui.TextDisplay(blocks[0])]
+        for block in blocks[1:]:
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
+            items.append(discord.ui.TextDisplay(block))
+        view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @discord.ui.button(label="Ergebnis eintragen", style=discord.ButtonStyle.primary)
     async def report_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         matches = await get_all_open_matches(self.t["id"])
         if not matches:
-            await interaction.response.send_message(embed=error_embed("Keine offenen Matches gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Keine offenen Matches gefunden."), ephemeral=True)
             return
         team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
         names = await team_name_map(team_ids)
         await interaction.response.send_message(
-            embed=info_embed("Welches Match?", "Admin-Eintragung wird sofort final gespeichert, ohne Bestätigung."),
+            content="Welches Match? (Admin-Eintragung wird sofort final gespeichert, ohne Bestätigung)",
             view=GroupMatchSelect(matches, names, is_admin=True),
             ephemeral=True,
         )
@@ -554,15 +691,14 @@ class TournamentAdminView(discord.ui.View):
     async def correct_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         matches = await get_all_completed_matches(self.t["id"])
         if not matches:
-            await interaction.response.send_message(embed=error_embed("Keine abgeschlossenen Matches gefunden."), ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Keine abgeschlossenen Matches gefunden."), ephemeral=True)
             return
         team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
         names = await team_name_map(team_ids)
         await interaction.response.send_message(
-            embed=info_embed(
-                "Welches Match korrigieren?",
-                "Läuft die KO-Phase schon, wird eine spätere Korrektur an einem Gruppenspiel NICHT rückwirkend "
-                "im Bracket nachgezogen - dann bitte auch das Bracket manuell prüfen.",
+            content=(
+                "Welches Match korrigieren? (Läuft die KO-Phase schon, wird eine spätere Korrektur an einem "
+                "Gruppenspiel NICHT rückwirkend im Bracket nachgezogen - dann bitte auch das Bracket manuell prüfen)"
             ),
             view=EditMatchSelectView(matches, names),
             ephemeral=True,
@@ -573,7 +709,7 @@ class TournamentAdminView(discord.ui.View):
         t = await get_tournament(self.t["id"])
         if t.get("phase") != "knockout":
             await interaction.response.send_message(
-                embed=error_embed("Nicht möglich", "Das Turnier muss erst in der KO-Phase sein, bevor es beendet werden kann."),
+                view=error_embed("Nicht möglich", "Das Turnier muss erst in der KO-Phase sein, bevor es beendet werden kann."),
                 ephemeral=True,
             )
             return
@@ -589,7 +725,7 @@ class TournamentAdminView(discord.ui.View):
             missing.append("Loser Bracket")
         if missing:
             await interaction.response.send_message(
-                embed=warning_embed(
+                view=warning_embed(
                     "Noch nicht fertig",
                     f"{', '.join(missing)} hat noch keinen Sieger. Turnier kann erst beendet werden, "
                     "wenn beide Brackets abgeschlossen sind.",
@@ -599,11 +735,10 @@ class TournamentAdminView(discord.ui.View):
             return
 
         await interaction.response.send_message(
-            embed=warning_embed(
-                "Sicher?",
-                "Das postet die Abschluss-Statistiken (Winner-/Loser-Top3, Awards, Top-11) in die konfigurierten "
-                "Kanäle und löscht danach **alle** für dieses Turnier erstellten Kanäle und Rollen "
-                "(Gruppen + Winner-/Loser-Bracket) unwiderruflich.",
+            content=(
+                "🚫 **Sicher?** Das postet die Abschluss-Statistiken (Winner-/Loser-Top3, Awards, Top-11) in die "
+                "konfigurierten Kanäle und löscht danach **alle** für dieses Turnier erstellten Kanäle und Rollen "
+                "(Gruppen + Winner-/Loser-Bracket) unwiderruflich."
             ),
             view=EndTournamentConfirmView(self.t["id"]),
             ephemeral=True,
@@ -612,7 +747,7 @@ class TournamentAdminView(discord.ui.View):
     @discord.ui.button(label="Turnier löschen", style=discord.ButtonStyle.danger)
     async def delete_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            embed=warning_embed("Sicher?", "Das löscht das Turnier inkl. aller Anmeldungen und Matches unwiderruflich."),
+            content="🚫 **Sicher?** Das löscht das Turnier inkl. aller Anmeldungen und Matches unwiderruflich.",
             view=ConfirmDeleteView(self.t["id"]),
             ephemeral=True,
         )
@@ -627,11 +762,11 @@ class ConfirmDeleteView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         pool = get_pool()
         await pool.execute("DELETE FROM tournaments WHERE id = $1", self.tournament_id)
-        await interaction.response.edit_message(content=None, embed=success_embed("Turnier gelöscht."), view=None)
+        await interaction.response.edit_message(content=None, view=success_embed("Turnier gelöscht."))
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+        await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
 
 
 class DMBroadcastModal(discord.ui.Modal, title="DM an alle Vereinsmanager"):
@@ -650,7 +785,7 @@ class DMBroadcastModal(discord.ui.Modal, title="DM an alle Vereinsmanager"):
                 recipient_ids.add(m["discord_id"])
 
         if not recipient_ids:
-            await interaction.followup.send(embed=error_embed("Keine Team-Manager gefunden."), ephemeral=True)
+            await interaction.followup.send(view=error_embed("Keine Team-Manager gefunden."), ephemeral=True)
             return
 
         dm_embed = info_embed(self.dm_title.value, self.dm_message.value)
@@ -666,7 +801,7 @@ class DMBroadcastModal(discord.ui.Modal, title="DM an alle Vereinsmanager"):
                 failed += 1
 
         await interaction.followup.send(
-            embed=success_embed("DM-Broadcast abgeschlossen", f"Zugestellt: {sent} | Fehlgeschlagen: {failed}"),
+            view=success_embed("DM-Broadcast abgeschlossen", f"Zugestellt: {sent} | Fehlgeschlagen: {failed}"),
             ephemeral=True,
         )
 
@@ -715,6 +850,10 @@ class AdminPanel(discord.ui.LayoutView):
             discord.ui.ActionRow(
                 discord.ui.Button(label="Nachricht erstellen", style=discord.ButtonStyle.secondary, custom_id="admin:embed"),
                 discord.ui.Button(label="DM an alle Vereinsmanager", style=discord.ButtonStyle.secondary, custom_id="admin:dmall"),
+                discord.ui.Button(label="Admin-Rolle festlegen", style=discord.ButtonStyle.secondary, custom_id="admin:setrole"),
+            ),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="Ticket-System einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:ticketconfig"),
             ),
             accent_color=discord.Color.gold(),
         )
@@ -741,8 +880,8 @@ class AdminPanelCog(commands.Cog):
         if not custom_id.startswith("admin:"):
             return
 
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(embed=error_embed("Nur Admins können das Admin-Panel nutzen."), ephemeral=True)
+        if not await is_tournament_admin(interaction.user):
+            await interaction.response.send_message(view=error_embed("Nur Admins können das Admin-Panel nutzen."), ephemeral=True)
             return
 
         action = custom_id.split(":", 1)[1]
@@ -756,65 +895,87 @@ class AdminPanelCog(commands.Cog):
                 "SELECT id, name FROM tournaments WHERE guild_id = $1 ORDER BY created_at DESC", interaction.guild_id
             )
             if not rows:
-                await interaction.response.send_message(embed=error_embed("Noch keine Turniere vorhanden."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Noch keine Turniere vorhanden."), ephemeral=True)
                 return
             tournaments = [dict(r) for r in rows]
             await interaction.response.send_message(
-                embed=info_embed("Welches Turnier verwalten?"), view=TournamentSelect(tournaments), ephemeral=True
+                content="Welches Turnier verwalten?", view=TournamentSelect(tournaments), ephemeral=True
             )
 
         elif action == "statschannels":
             await interaction.response.send_message(
-                embed=info_embed("Wähle für jeden Bereich den passenden Kanal aus:"),
+                content="Wähle für jeden Bereich den passenden Kanal aus:",
                 view=StatsChannelsConfigView(interaction.guild_id, StatsChannelsConfigView.ALL_FIELDS[:5]),
                 ephemeral=True,
             )
             await interaction.followup.send(
-                embed=info_embed("Und noch zwei:"),
+                content="Und noch zwei:",
                 view=StatsChannelsConfigView(interaction.guild_id, StatsChannelsConfigView.ALL_FIELDS[5:]),
                 ephemeral=True,
             )
 
         elif action == "banplayer":
             await interaction.response.send_message(
-                embed=info_embed("Wähle den zu sperrenden Spieler aus:"), view=PlayerBanView(), ephemeral=True
+                content="Wähle den zu sperrenden Spieler aus:", view=PlayerBanView(), ephemeral=True
             )
 
         elif action == "banteam":
             teams = await get_all_guild_teams(interaction.guild_id)
             if not teams:
-                await interaction.response.send_message(embed=error_embed("Noch keine Teams auf diesem Server."), ephemeral=True)
+                await interaction.response.send_message(view=error_embed("Noch keine Teams auf diesem Server."), ephemeral=True)
                 return
             await interaction.response.send_message(
-                embed=info_embed("Wähle das zu sperrende Team aus:"), view=TeamBanView(teams), ephemeral=True
+                content="Wähle das zu sperrende Team aus:", view=TeamBanView(teams), ephemeral=True
             )
 
         elif action == "banlist":
             user_bans = await get_all_bans(interaction.guild_id)
             team_bans = await get_all_team_bans(interaction.guild_id)
             if not user_bans and not team_bans:
-                await interaction.response.send_message(embed=info_embed("Aktuell ist niemand/kein Team gesperrt."), ephemeral=True)
+                await interaction.response.send_message(view=info_embed("Aktuell ist niemand/kein Team gesperrt."), ephemeral=True)
                 return
-            embed = info_embed("Gesperrte Spieler & Teams")
+            blocks = ["### Gesperrte Spieler & Teams"]
             if user_bans:
-                lines = []
+                lines = ["**Spieler:**"]
                 for b in user_bans:
                     until = b["expires_at"].strftime("%d.%m.%Y %H:%M") if b["expires_at"] else "dauerhaft"
                     lines.append(f"<@{b['discord_id']}> - bis {until} - Grund: {b['reason'] or 'keiner'}")
-                embed.add_field(name="Spieler", value="\n".join(lines), inline=False)
+                blocks.append("\n".join(lines))
             if team_bans:
-                lines = []
+                lines = ["**Teams:**"]
                 for b in team_bans:
                     until = b["expires_at"].strftime("%d.%m.%Y %H:%M") if b["expires_at"] else "dauerhaft"
                     lines.append(f"**{b['team_name']}** - bis {until} - Grund: {b['reason'] or 'keiner'}")
-                embed.add_field(name="Teams", value="\n".join(lines), inline=False)
-            await interaction.response.send_message(embed=embed, view=UnbanSelect(user_bans, team_bans), ephemeral=True)
+                blocks.append("\n".join(lines))
+            await interaction.response.send_message(content="\n\n".join(blocks), view=UnbanSelect(user_bans, team_bans), ephemeral=True)
 
         elif action == "embed":
             await interaction.response.send_modal(EmbedBuilderModal())
 
         elif action == "dmall":
             await interaction.response.send_modal(DMBroadcastModal())
+
+        elif action == "setrole":
+            pool = get_pool()
+            row = await pool.fetchrow("SELECT admin_role_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            current = f"<@&{row['admin_role_id']}>" if row and row["admin_role_id"] else "keine gesetzt"
+            await interaction.response.send_message(
+                content=f"**Admin-Rolle festlegen**\nAktuell: {current}\nWähle eine neue Rolle, oder 'Entfernen' um zurückzusetzen (dann zählen nur noch echte Server-Admins).",
+                view=AdminRoleSelectView(),
+                ephemeral=True,
+            )
+
+        elif action == "ticketconfig":
+            await interaction.response.send_message(
+                content=(
+                    "**Ticket-System einstellen**\n"
+                    "- Kategorie: wo neue Ticket-Kanäle angelegt werden\n"
+                    "- Log-Kanal: wo Transkripte beim Schließen landen\n"
+                    "- Support-Rolle: wer Tickets sehen/übernehmen/schließen darf (zusätzlich zu Admins)"
+                ),
+                view=TicketConfigView(),
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):

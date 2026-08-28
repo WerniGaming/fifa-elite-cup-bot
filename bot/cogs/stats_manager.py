@@ -17,6 +17,7 @@ import discord
 from discord.ext import commands
 
 from db import get_pool
+from ui_helpers import success_embed
 from ea_api import EAProClubsAPI
 from cogs.tournament_manager import (
     get_tournament,
@@ -367,7 +368,7 @@ class StatsChannelsConfigView(discord.ui.View):
                 """,
                 self.guild_id, channel_id,
             )
-            await interaction.response.send_message(f"✅ {label}-Kanal gesetzt: <#{channel_id}>", ephemeral=True)
+            await interaction.response.send_message(view=success_embed(f"{label}-Kanal gesetzt", f"<#{channel_id}>"), ephemeral=True)
         return callback
 
 

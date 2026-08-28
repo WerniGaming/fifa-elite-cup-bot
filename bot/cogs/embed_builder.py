@@ -13,6 +13,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ui_helpers import success_embed, error_embed
+
 
 def parse_color(raw: str) -> discord.Color:
     raw = (raw or "").strip().lstrip("#")
@@ -66,10 +68,10 @@ class EmbedPostView(discord.ui.View):
         channel_id = int(interaction.data["values"][0])
         channel = interaction.guild.get_channel(channel_id)
         if channel is None:
-            await interaction.response.send_message("Kanal nicht gefunden.", ephemeral=True)
+            await interaction.response.send_message(view=error_embed("Kanal nicht gefunden."), ephemeral=True)
             return
         await channel.send(embed=self.embed)
-        await interaction.response.send_message(f"✅ Nachricht gepostet in {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(view=success_embed(f"Nachricht gepostet in {channel.mention}"), ephemeral=True)
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):

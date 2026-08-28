@@ -79,3 +79,28 @@ class EAProClubsAPI:
         if isinstance(data, dict):
             return data.get(str(club_id), data)
         return data
+
+    async def get_seasonal_stats(self, club_id: str, platform: str = "common-gen5") -> dict:
+        """Liga/Division-Stand der aktuellen/letzten Saison."""
+        data = await self._get(
+            "/clubs/seasonalStats",
+            {"platform": platform, "clubIds": club_id},
+        )
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data.get(str(club_id), data)
+        return {}
+
+    async def get_members(self, club_id: str, platform: str = "common-gen5") -> list[dict]:
+        """Kader-Liste (Spielerstatistiken innerhalb des Clubs)."""
+        data = await self._get(
+            "/members/career/stats",
+            {"platform": platform, "clubId": club_id},
+        )
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+            return []
+        return data or []
