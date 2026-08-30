@@ -14,6 +14,7 @@ from discord.ext import commands
 
 import io
 import logging
+import re
 import os
 
 import asyncpg
@@ -25,6 +26,98 @@ from ui_helpers import success_embed, error_embed, info_embed, warning_embed
 log = logging.getLogger("fifa-elite-cup")
 
 PLATFORM_DEFAULT = "common-gen5"
+TWITCH_LINK_PATTERN = re.compile(r"^https://www\.twitch\.tv/[A-Za-z0-9_]+/?$")
+
+
+def is_valid_twitch_link(value: str) -> bool:
+    return bool(TWITCH_LINK_PATTERN.match(value.strip()))
+
+
+async def apply_team_nickname(member: discord.Member, team_name: str) -> bool:
+    """Setzt den Server-Nickname auf 'Team | Username'. Gibt False zurueck, falls keine Berechtigung."""
+    base_username = member.name
+    new_nick = f"{team_name} | {base_username}"[:32]
+    if member.display_name == new_nick:
+        return True
+    try:
+        await member.edit(nick=new_nick)
+        return True
+    except discord.Forbidden:
+        log.warning(f"Konnte Nickname von {member} nicht setzen (fehlende Berechtigung, z.B. hoehere Rolle oder Server-Owner).")
+        return False
+    except discord.HTTPException:
+        log.exception(f"Fehler beim Setzen des Nicknames fuer {member}")
+        return False
+
+
+async def _toggle_configured_role(guild: discord.Guild, member: discord.Member, settings_column: str, grant: bool):
+    """Vergibt/entzieht die in guild_settings.{settings_column} konfigurierte Rolle - macht nichts, falls keine gesetzt ist."""
+    pool = get_pool()
+    row = await pool.fetchrow(f"SELECT {settings_column} FROM guild_settings WHERE guild_id = $1", guild.id)
+    role_id = row[settings_column] if row else None
+    if not role_id:
+        return
+    role = guild.get_role(role_id)
+    if not role:
+        return
+    try:
+        if grant:
+            await member.add_roles(role)
+        else:
+            await member.remove_roles(role)
+    except discord.HTTPException:
+        log.exception(f"Fehler beim {'Vergeben' if grant else 'Entziehen'} der Rolle {role_id} an {member}")
+
+
+async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
+    """Baut die Stream-Link-Uebersicht neu auf (oder legt sie an) im konfigurierten Kanal."""
+    pool = get_pool()
+    settings = await pool.fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild.id)
+    if not settings or not settings["stream_list_channel_id"]:
+        return
+
+    channel = guild.get_channel(settings["stream_list_channel_id"])
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(settings["stream_list_channel_id"])
+        except discord.HTTPException:
+            return
+
+    teams = await pool.fetch(
+        "SELECT name, stream_link FROM teams WHERE guild_id = $1 AND stream_link IS NOT NULL ORDER BY name",
+        guild.id,
+    )
+
+    lines = ["# 📺 Stream-Übersicht", ""]
+    if teams:
+        lines += [f"**{t['name']}** — {t['stream_link']}" for t in teams]
+    else:
+        lines.append("_Aktuell hat kein Team einen Stream-Link hinterlegt._")
+    lines.append("")
+    now_ts = int(discord.utils.utcnow().timestamp())
+    lines.append(f"-# Zuletzt aktualisiert: <t:{now_ts}:R>")
+    text = "\n".join(lines)
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
+
+    if settings["stream_list_message_id"]:
+        try:
+            msg = await channel.fetch_message(settings["stream_list_message_id"])
+            await msg.edit(view=view)
+            return
+        except discord.HTTPException:
+            pass
+
+    try:
+        msg = await channel.send(view=view)
+        await pool.execute(
+            "UPDATE guild_settings SET stream_list_message_id = $1 WHERE guild_id = $2", msg.id, guild.id
+        )
+    except discord.HTTPException:
+        log.exception(f"Fehler beim Erstellen der Stream-Uebersicht in Guild {guild.id}")
+
+
 BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "banner.jpg")
 
 
@@ -93,12 +186,22 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
     """
     ea_club_name = discord.ui.TextInput(label="EA FC 26 Pro Clubs Name", max_length=60)
     stream_link = discord.ui.TextInput(
-        label="Stream-Link (Twitch/YouTube)", required=False, max_length=200
+        label="Twitch-Link (z.B. https://www.twitch.tv/name)", required=False, max_length=200
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         pool = get_pool()
+
+        if self.stream_link.value and not is_valid_twitch_link(self.stream_link.value):
+            await interaction.followup.send(
+                view=error_embed(
+                    "Das ist kein gültiger Twitch-Link.",
+                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                ),
+                ephemeral=True,
+            )
+            return
 
         from cogs.moderation import get_active_ban, format_ban_reason
         ban = await get_active_ban(interaction.guild_id, interaction.user.id)
@@ -162,6 +265,10 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             "INSERT INTO team_managers (team_id, discord_id, role) VALUES ($1, $2, 'owner')",
             team_id, interaction.user.id,
         )
+        await apply_team_nickname(interaction.user, ea_club_name)
+        await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=True)
+        if self.stream_link.value:
+            await refresh_stream_list(interaction.client, interaction.guild)
 
         await interaction.followup.send(
             f"✅ Team **{ea_club_name}** erstellt und verknüpft! "
@@ -179,9 +286,20 @@ class EditFieldModal(discord.ui.Modal):
         self.add_item(self.value_input)
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.field == "stream_link" and self.value_input.value and not is_valid_twitch_link(self.value_input.value):
+            await interaction.response.send_message(
+                view=error_embed(
+                    "Das ist kein gültiger Twitch-Link.",
+                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                ),
+                ephemeral=True,
+            )
+            return
         pool = get_pool()
         await pool.execute(f"UPDATE teams SET {self.field} = $1 WHERE id = $2", self.value_input.value or None, self.team_id)
         await interaction.response.send_message(view=success_embed("Aktualisiert."), ephemeral=True)
+        if self.field == "stream_link":
+            await refresh_stream_list(interaction.client, interaction.guild)
 
 
 # ---------- Ephemere Untermenüs ----------
@@ -332,6 +450,12 @@ class CoManagerView(discord.ui.View):
         except Exception:
             await interaction.response.send_message(view=warning_embed(f"{user.mention} ist bereits Manager dieses Teams."), ephemeral=True)
             return
+        member = interaction.guild.get_member(user.id)
+        if member:
+            await apply_team_nickname(member, self.team["name"])
+            await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=True)
+            from cogs.tournament_manager import grant_live_tournament_access
+            await grant_live_tournament_access(interaction.guild, self.team["id"], member)
         await interaction.response.send_message(view=success_embed(f"{user.mention} ist jetzt Co-Manager von {self.team['name']}"), ephemeral=True)
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Co-Manager entfernen")
@@ -343,6 +467,9 @@ class CoManagerView(discord.ui.View):
             await interaction.response.send_message(view=warning_embed("Der Team-Owner kann hier nicht entfernt werden."), ephemeral=True)
             return
         await pool.execute("DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2", self.team["id"], user.id)
+        member = interaction.guild.get_member(user.id)
+        if member:
+            await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=False)
         await interaction.response.send_message(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
 
 
@@ -357,12 +484,16 @@ class LeaveConfirmView(discord.ui.View):
         pool = get_pool()
         if self.is_owner:
             await pool.execute("DELETE FROM teams WHERE id = $1", self.team["id"])
+            await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=False)
             await interaction.response.edit_message(content=f"🗑️ Team **{self.team['name']}** wurde gelöscht.", view=None)
+            if self.team.get("stream_link"):
+                await refresh_stream_list(interaction.client, interaction.guild)
         else:
             await pool.execute(
                 "DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2",
                 self.team["id"], interaction.user.id,
             )
+            await _toggle_configured_role(interaction.guild, interaction.user, "co_manager_role_id", grant=False)
             await interaction.response.edit_message(content=f"👋 Du hast **{self.team['name']}** verlassen.", view=None)
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)

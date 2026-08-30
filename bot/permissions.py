@@ -19,6 +19,17 @@ async def is_tournament_admin(member: discord.Member) -> bool:
     return any(r.id == row["admin_role_id"] for r in member.roles)
 
 
+async def is_tournament_moderator(member: discord.Member) -> bool:
+    """Admin ODER die globale Moderator-Rolle (darf Ergebnisse fuer alle Turniere/Gruppen melden/bestaetigen, ohne vollen Admin-Zugriff)."""
+    if await is_tournament_admin(member):
+        return True
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT mod_role_id FROM guild_settings WHERE guild_id = $1", member.guild.id)
+    if not row or not row["mod_role_id"]:
+        return False
+    return any(r.id == row["mod_role_id"] for r in member.roles)
+
+
 async def is_ticket_support(member: discord.Member) -> bool:
     """Admin ODER die separate Ticket-Support-Rolle (z.B. fuer Moderatoren ohne vollen Admin-Zugriff)."""
     if await is_tournament_admin(member):

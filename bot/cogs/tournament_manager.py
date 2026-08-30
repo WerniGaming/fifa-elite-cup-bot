@@ -17,9 +17,9 @@ from discord.ext import commands
 
 from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed
-from permissions import is_tournament_admin
+from permissions import is_tournament_admin, is_tournament_moderator
 from typing import Literal
-from cogs.team_manager import get_team_for_user, get_role_for_user, get_team_managers
+from cogs.team_manager import get_team_for_user, get_role_for_user, get_team_managers, is_valid_twitch_link
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 TOURNAMENT_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tournament_banner.jpg")
@@ -84,6 +84,25 @@ async def get_tournament(tournament_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM tournaments WHERE id = $1", tournament_id)
     return dict(row) if row else None
+
+
+async def get_unready_groups(tournament_id: int) -> list[dict]:
+    """Gruppen dieses Turniers, in denen noch nicht jedes Team 'Team ist da' bestaetigt hat."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT tg.id AS group_id, tg.group_number,
+               COUNT(*) FILTER (WHERE NOT tgt.confirmed_ready) AS unready_count
+        FROM tournament_group_teams tgt
+        JOIN tournament_groups tg ON tg.id = tgt.group_id
+        WHERE tg.tournament_id = $1
+        GROUP BY tg.id, tg.group_number
+        HAVING COUNT(*) FILTER (WHERE NOT tgt.confirmed_ready) > 0
+        ORDER BY tg.group_number
+        """,
+        tournament_id,
+    )
+    return [dict(r) for r in rows]
 
 
 async def get_unconfirmed_teams(tournament_id: int) -> list[dict]:
@@ -151,16 +170,42 @@ async def swap_team_for_bye(tournament_id: int, team_id: int):
 
 
 async def swap_team_for_waitlisted(tournament_id: int, team_id_out: int, team_id_in: int):
-    """Ersetzt ein registriertes Team gezielt durch ein bestimmtes Warteliste-Team."""
+    """
+    Ersetzt ein registriertes Team durch ein beliebiges anderes Team auf dem
+    Server - unabhaengig davon, ob das eintauschende Team bereits fuer dieses
+    Turnier angemeldet/auf der Warteliste war oder ueberhaupt noch nie.
+    """
     pool = get_pool()
     await pool.execute(
         "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
         tournament_id, team_id_out,
     )
     await pool.execute(
-        "UPDATE tournament_signups SET status = 'registered' WHERE tournament_id = $1 AND team_id = $2",
+        """
+        INSERT INTO tournament_signups (tournament_id, team_id, status)
+        VALUES ($1, $2, 'registered')
+        ON CONFLICT (tournament_id, team_id) DO UPDATE SET status = 'registered'
+        """,
         tournament_id, team_id_in,
     )
+
+
+async def get_all_teams_for_swap(guild_id: int, tournament_id: int, exclude_team_id: int) -> list[dict]:
+    """Alle Teams auf dem Server, die aktuell NICHT bei diesem Turnier registriert sind (fuers Eintauschen)."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT t.id, t.name FROM teams t
+        WHERE t.guild_id = $1 AND t.id != $2
+          AND NOT EXISTS (
+            SELECT 1 FROM tournament_signups ts
+            WHERE ts.tournament_id = $3 AND ts.team_id = t.id AND ts.status = 'registered'
+          )
+        ORDER BY t.name
+        """,
+        guild_id, exclude_team_id, tournament_id,
+    )
+    return [dict(r) for r in rows]
 
 
 async def get_team_signup(tournament_id: int, team_id: int) -> dict | None:
@@ -288,6 +333,7 @@ async def advance_tournament(tournament_id: int, current_round: int, bracket: st
         # die dann das Finale ist) -> zusaetzlich ein Spiel um Platz 3 zwischen den
         # beiden Halbfinal-Verlierern anlegen - gilt fuer BEIDE Brackets (Winner + Loser),
         # da beide als eigene KO-Phase bis Finale + Spiel um Platz 3 laufen sollen.
+        third_place_match = None
         if len(winners) == 2 and len(matches) == 2:
             losers = []
             for m in matches:
@@ -295,14 +341,21 @@ async def advance_tournament(tournament_id: int, current_round: int, bracket: st
                     loser = m["team2_id"] if m["winner_id"] == m["team1_id"] else m["team1_id"]
                     losers.append(loser)
             if len(losers) == 2:
-                await pool.execute(
+                row = await pool.fetchrow(
                     """
                     INSERT INTO tournament_matches (tournament_id, round, match_number, team1_id, team2_id, status, phase, bracket, is_third_place_match)
                     VALUES ($1, $2, 999, $3, $4, 'pending', 'knockout', $5, true)
                     ON CONFLICT (tournament_id, phase, bracket, round, match_number) DO NOTHING
+                    RETURNING id
                     """,
                     tournament_id, round_num + 1, losers[0], losers[1], bracket,
                 )
+                if row:
+                    third_place_match = {
+                        "id": row["id"], "match_number": 999,
+                        "team1_id": losers[0], "team2_id": losers[1], "winner_id": None, "status": "pending",
+                        "is_third_place_match": True,
+                    }
 
         next_round = round_num + 1
         match_num = 1
@@ -332,6 +385,8 @@ async def advance_tournament(tournament_id: int, current_round: int, bracket: st
             match_num += 1
 
         round_num = next_round
+        if third_place_match:
+            next_matches.append(third_place_match)
         # Schleife prueft die neue Runde erneut - falls sie zufaellig nur aus
         # Freilosen besteht, geht's direkt weiter zur uebernaechsten Runde.
         if not all(m["status"] == "completed" for m in next_matches):
@@ -354,6 +409,40 @@ async def get_round_matches(tournament_id: int, round_num: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def withdraw_team_with_forfeits(bot: commands.Bot, guild: discord.Guild, tournament_id: int, team_id: int) -> int:
+    """
+    Team verlaesst mitten im Turnier: ALLE noch offenen Spiele dieses Teams
+    (Gruppenphase + KO-Phase) werden automatisch 1:0 fuer den jeweiligen
+    Gegner gewertet (Def-Win). Team wird zusaetzlich als 'withdrawn' markiert,
+    damit es bei einem spaeteren KO-Phase-Start NICHT mehr fuer Winner-/Loser-
+    Bracket qualifiziert wird, egal wie seine (eingefrorene) Tabellenposition
+    aussieht. Gibt die Anzahl der betroffenen Spiele zurueck.
+    """
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
+        tournament_id, team_id,
+    )
+    open_matches = await pool.fetch(
+        """
+        SELECT * FROM tournament_matches
+        WHERE tournament_id = $1 AND status != 'completed'
+          AND (team1_id = $2 OR team2_id = $2)
+        """,
+        tournament_id, team_id,
+    )
+    count = 0
+    for m in open_matches:
+        opponent_id = m["team2_id"] if m["team1_id"] == team_id else m["team1_id"]
+        if opponent_id is None:
+            continue  # Freilos gegen Freilos - nichts zu werten
+        score1 = 0 if m["team1_id"] == team_id else 1
+        score2 = 1 if m["team1_id"] == team_id else 0
+        await finalize_match_result(bot, guild, m["id"], score1, score2)
+        count += 1
+    return count
+
+
 async def get_match(match_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM tournament_matches WHERE id = $1", match_id)
@@ -368,7 +457,7 @@ async def get_open_matches_for_team(group_id: int, team_id: int) -> list[dict]:
         JOIN tournament_groups tg ON tg.id = tm.group_id
         WHERE tm.group_id = $1 AND tm.status = 'pending' AND tm.round <= tg.released_round
               AND (tm.team1_id = $2 OR tm.team2_id = $2)
-        ORDER BY tm.match_number
+        ORDER BY tm.round DESC, tm.match_number
         """,
         group_id, team_id,
     )
@@ -382,7 +471,7 @@ async def get_open_matches_in_group(group_id: int) -> list[dict]:
         SELECT tm.* FROM tournament_matches tm
         JOIN tournament_groups tg ON tg.id = tm.group_id
         WHERE tm.group_id = $1 AND tm.status = 'pending' AND tm.round <= tg.released_round
-        ORDER BY tm.match_number
+        ORDER BY tm.round DESC, tm.match_number
         """,
         group_id,
     )
@@ -396,7 +485,7 @@ async def get_open_matches_for_team_bracket(tournament_id: int, bracket: str, te
         SELECT * FROM tournament_matches
         WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2 AND status = 'pending'
               AND (team1_id = $3 OR team2_id = $3)
-        ORDER BY round, match_number
+        ORDER BY round DESC, match_number
         """,
         tournament_id, bracket, team_id,
     )
@@ -410,7 +499,7 @@ async def get_open_matches_in_bracket(tournament_id: int, bracket: str) -> list[
         SELECT * FROM tournament_matches
         WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2 AND status = 'pending'
               AND team1_id IS NOT NULL AND team2_id IS NOT NULL
-        ORDER BY round, match_number
+        ORDER BY round DESC, match_number
         """,
         tournament_id, bracket,
     )
@@ -418,13 +507,14 @@ async def get_open_matches_in_bracket(tournament_id: int, bracket: str) -> list[
 
 
 async def get_all_open_matches(tournament_id: int) -> list[dict]:
-    """Alle offenen Matches eines Turniers (Gruppen- UND KO-Phase), fuer Admin-Auswahl - ignoriert Spieltag-Freigabe."""
+    """Alle offenen Matches eines Turniers (Gruppen- UND KO-Phase), fuer Admin-Auswahl - ignoriert Spieltag-Freigabe.
+    KO-Phase-Spiele zuerst, damit sie nicht durch das 25er-Auswahllisten-Limit von alten Gruppenspielen verdraengt werden."""
     pool = get_pool()
     rows = await pool.fetch(
         """
         SELECT * FROM tournament_matches
         WHERE tournament_id = $1 AND status = 'pending' AND team1_id IS NOT NULL AND team2_id IS NOT NULL
-        ORDER BY phase, round, match_number
+        ORDER BY (phase = 'knockout') DESC, round, match_number
         """,
         tournament_id,
     )
@@ -432,13 +522,14 @@ async def get_all_open_matches(tournament_id: int) -> list[dict]:
 
 
 async def get_all_completed_matches(tournament_id: int) -> list[dict]:
-    """Alle bereits abgeschlossenen Matches, zum nachtraeglichen Korrigieren durch einen Admin."""
+    """Alle bereits abgeschlossenen Matches, zum nachtraeglichen Korrigieren durch einen Admin.
+    KO-Phase-Spiele zuerst, damit sie nicht durch das 25er-Auswahllisten-Limit von alten Gruppenspielen verdraengt werden."""
     pool = get_pool()
     rows = await pool.fetch(
         """
         SELECT * FROM tournament_matches
         WHERE tournament_id = $1 AND status = 'completed' AND team1_id IS NOT NULL AND team2_id IS NOT NULL
-        ORDER BY phase, round, match_number
+        ORDER BY (phase = 'knockout') DESC, round, match_number
         """,
         tournament_id,
     )
@@ -568,6 +659,7 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
                     channel = None
             if channel:
                 await channel.send(f"🥉 **Spiel um Platz 3:** {names.get(winner_id, '?')} wird Dritter!")
+        await refresh_bracket_panel(bot, match["tournament_id"], match["bracket"])
         return None
 
     if match["phase"] == "group":
@@ -581,8 +673,10 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
         return None
 
     bracket = match["bracket"] or "winner"
+    await refresh_bracket_panel(bot, match["tournament_id"], bracket)
     result = await advance_tournament(match["tournament_id"], match["round"], bracket)
     if result is None:
+        await refresh_live_schedule(bot, guild, match["tournament_id"])
         return None
 
     pool2 = get_pool()
@@ -620,15 +714,16 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
         )
         if both_done:
             await pool2.execute("UPDATE tournaments SET status = 'finished' WHERE id = $1", match["tournament_id"])
+        await refresh_bracket_panel(bot, match["tournament_id"], bracket)
 
     elif result[0] == "next_round":
         _, next_round, next_matches = result
-        ids = [m["team1_id"] for m in next_matches] + [m["team2_id"] for m in next_matches]
-        names = await team_name_map(ids)
-        text = format_bracket_text(next_matches, names, round_num=next_round)
+        round_label = round_name(len([m for m in next_matches if not m.get("is_third_place_match")]) or len(next_matches))
         if bracket_channel:
-            await bracket_channel.send(f"➡️ Vorrunde abgeschlossen, weiter geht's:\n\n{text}")
+            await bracket_channel.send("➡️ Vorrunde abgeschlossen, weiter geht's:")
+            await release_ko_round(bot, bracket_channel, next_matches, round_label)
             await bracket_channel.send(view=build_bracket_actions_view(match["tournament_id"], bracket))
+        await refresh_bracket_panel(bot, match["tournament_id"], bracket)
 
     await refresh_live_schedule(bot, guild, match["tournament_id"])
     return result
@@ -697,9 +792,21 @@ class ScoreModal(discord.ui.Modal):
         opponent_managers = await get_team_managers(opponent_team_id)
         mentions = " ".join(f"<@{m['discord_id']}>" for m in opponent_managers) or "(kein Manager gefunden)"
 
-        embed = info_embed(
-            f"{names.get(match['team1_id'])} {s1}:{s2} {names.get(match['team2_id'])}",
-            "Ergebnis gemeldet - bitte bestätigen oder ablehnen.",
+        text = (
+            (f"{mentions}\n" if mentions else "")
+            + f"### {names.get(match['team1_id'])} {s1}:{s2} {names.get(match['team2_id'])}\n"
+            "Ergebnis gemeldet - bitte bestätigen oder ablehnen."
+        )
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(text),
+                discord.ui.ActionRow(
+                    discord.ui.Button(label="Bestätigen", style=discord.ButtonStyle.success, custom_id=f"matchconfirm:{self.match_id}:yes"),
+                    discord.ui.Button(label="Ablehnen", style=discord.ButtonStyle.danger, custom_id=f"matchconfirm:{self.match_id}:no"),
+                ),
+                accent_color=discord.Color.gold(),
+            )
         )
 
         image_file = None
@@ -710,12 +817,9 @@ class ScoreModal(discord.ui.Modal):
                 log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Bestaetigungs-Embed (Match {self.match_id})")
 
         if image_file:
-            embed.set_image(url=f"attachment://{image_file.filename}")
-            await interaction.response.send_message(
-                content=mentions, embed=embed, file=image_file, view=ConfirmMatchView(self.match_id)
-            )
+            await interaction.response.send_message(view=view, file=image_file)
         else:
-            await interaction.response.send_message(content=mentions, embed=embed, view=ConfirmMatchView(self.match_id))
+            await interaction.response.send_message(view=view)
 
 
 class ConfirmMatchView(discord.ui.View):
@@ -824,22 +928,113 @@ async def build_group_standings_text(group_id: int) -> str:
             "SELECT COUNT(*) FROM tournament_matches WHERE group_id = $1 AND winner_id = $2",
             group_id, tr["team_id"],
         )
-        standings.append({"team_id": tr["team_id"], "wins": wins})
-    standings.sort(key=lambda x: x["wins"], reverse=True)
+        goals_row = await pool.fetchrow(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN team1_id = $2 THEN team1_score WHEN team2_id = $2 THEN team2_score ELSE 0 END), 0) AS goals_for,
+              COALESCE(SUM(CASE WHEN team1_id = $2 THEN team2_score WHEN team2_id = $2 THEN team1_score ELSE 0 END), 0) AS goals_against
+            FROM tournament_matches
+            WHERE group_id = $1 AND status = 'completed' AND (team1_id = $2 OR team2_id = $2)
+            """,
+            group_id, tr["team_id"],
+        )
+        goals_for = goals_row["goals_for"] or 0
+        goals_against = goals_row["goals_against"] or 0
+        standings.append({
+            "team_id": tr["team_id"], "wins": wins,
+            "goals_for": goals_for, "goals_against": goals_against,
+            "goal_diff": goals_for - goals_against,
+        })
+    standings.sort(key=lambda x: (x["wins"], x["goal_diff"], x["goals_for"]), reverse=True)
 
     names = await team_name_map([s["team_id"] for s in standings])
     lines = ["**Tabelle**", ""]
     for i, s in enumerate(standings, start=1):
-        lines.append(f"`{i}.` {names.get(s['team_id'], '?')} — `{s['wins']}` Siege")
+        lines.append(
+            f"`{i}.` {names.get(s['team_id'], '?')} — `{s['wins']}` Siege · Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
+        )
     return "\n".join(lines)
 
 
+async def grant_live_tournament_access(guild: discord.Guild, team_id: int, member: discord.Member):
+    """
+    Gibt einem neuen Team-Manager (Owner oder Co-Manager) sofortigen Zugriff auf
+    ALLE aktuell laufenden Turnier-Kanaele (Gruppen- + Bracket-Rollen), in denen
+    das Team gerade mitspielt - wichtig, wenn ein Co-Manager WAEHREND eines
+    laufenden Turniers hinzugefuegt wird.
+    """
+    pool = get_pool()
+
+    group_rows = await pool.fetch(
+        """
+        SELECT tg.role_id FROM tournament_group_teams tgt
+        JOIN tournament_groups tg ON tg.id = tgt.group_id
+        JOIN tournaments t ON t.id = tg.tournament_id
+        WHERE tgt.team_id = $1 AND t.phase = 'groups'
+        """,
+        team_id,
+    )
+    bracket_rows = await pool.fetch(
+        """
+        SELECT DISTINCT tbm.role_id FROM tournament_matches tm
+        JOIN tournament_bracket_meta tbm ON tbm.tournament_id = tm.tournament_id AND tbm.bracket = tm.bracket
+        JOIN tournaments t ON t.id = tm.tournament_id
+        WHERE (tm.team1_id = $1 OR tm.team2_id = $1) AND tm.phase = 'knockout' AND t.phase = 'knockout'
+        """,
+        team_id,
+    )
+
+    for row in list(group_rows) + list(bracket_rows):
+        role = guild.get_role(row["role_id"])
+        if role:
+            try:
+                await member.add_roles(role)
+            except discord.HTTPException:
+                pass
+
+
 async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
-    standings_text = await build_group_standings_text(group_id)
+    """
+    Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Solange nicht
+    jedes Team der Gruppe 'Team ist da' bestaetigt hat, zeigt das Panel eine
+    Check-in-Checkliste statt der Tabelle - Spieltag 1 bleibt so lange blockiert.
+    """
+    pool = get_pool()
+    team_rows = await pool.fetch(
+        "SELECT team_id, confirmed_ready FROM tournament_group_teams WHERE group_id = $1", group_id
+    )
     view = discord.ui.LayoutView(timeout=None)
+    all_ready = all(tr["confirmed_ready"] for tr in team_rows) if team_rows else True
+
+    if not all_ready:
+        names = await team_name_map([tr["team_id"] for tr in team_rows])
+        lines = ["**Team-Check-in**", "_Erst wenn hier jedes Team bestätigt hat, kann Spieltag 1 freigegeben werden._", ""]
+        for tr in team_rows:
+            mark = "✅" if tr["confirmed_ready"] else "⏳"
+            lines.append(f"{mark} {names.get(tr['team_id'], '?')}")
+        container = discord.ui.Container(
+            discord.ui.TextDisplay("\n".join(lines)),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
+            ),
+            accent_color=discord.Color.gold(),
+        )
+        view.add_item(container)
+        return view
+
+    standings_text = await build_group_standings_text(group_id)
     container = discord.ui.Container(
         discord.ui.TextDisplay(standings_text),
-        discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large),
+        accent_color=discord.Color.gold(),
+    )
+    view.add_item(container)
+    return view
+
+
+def build_group_actions_view(group_id: int) -> discord.ui.LayoutView:
+    """Die Spielaktions-Buttons - bleiben im normalen Gruppenkanal, wo Manager schreiben duerfen."""
+    view = discord.ui.LayoutView(timeout=None)
+    container = discord.ui.Container(
         discord.ui.TextDisplay(
             "**Spielaktionen**\n"
             "- Gespielt: prüft automatisch bei EA, ob ihr gegen den richtigen Gegner gespielt habt, "
@@ -859,15 +1054,51 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     return view
 
 
+async def create_group_panel_channel(guild: discord.Guild, category: discord.CategoryChannel, group: dict) -> discord.TextChannel:
+    """
+    Legt einen eigenen 'nur Panel'-Kanal fuer eine Gruppe an (z.B. 'gruppe-1-panel'),
+    sichtbar fuer dieselbe Gruppen-Rolle wie der normale Gruppenkanal, aber nur der
+    Bot darf dort schreiben - bleibt dadurch dauerhaft sauber. Postet das aktuelle
+    Panel (NUR Tabelle) dort und aktualisiert panel_channel_id + panel_message_id in
+    der DB. Die Spielaktions-Buttons werden zusaetzlich (erneut) im NORMALEN
+    Gruppenkanal gepostet, da Manager dort schreiben/interagieren.
+    """
+    pool = get_pool()
+    role = guild.get_role(group["role_id"])
+    overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+    if role:
+        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
+
+    panel_channel = await guild.create_text_channel(
+        f"gruppe-{group['group_number']}-panel", category=category, overwrites=overwrites
+    )
+    panel = await build_group_panel(group["id"])
+    msg = await panel_channel.send(view=panel)
+    await pool.execute(
+        "UPDATE tournament_groups SET panel_channel_id = $1, panel_message_id = $2 WHERE id = $3",
+        panel_channel.id, msg.id, group["id"],
+    )
+
+    main_channel = guild.get_channel(group.get("channel_id")) if group.get("channel_id") else None
+    if main_channel:
+        try:
+            await main_channel.send(view=build_group_actions_view(group["id"]))
+        except discord.HTTPException:
+            log.exception(f"Fehler beim erneuten Posten der Aktions-Buttons im Gruppenkanal (Gruppe {group['id']})")
+
+    return panel_channel
+
+
 async def refresh_group_panel(bot: commands.Bot, group_id: int):
     pool = get_pool()
     group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
     if not group or not group["panel_message_id"]:
         return
-    channel = bot.get_channel(group["channel_id"])
+    target_channel_id = group["panel_channel_id"] or group["channel_id"]
+    channel = bot.get_channel(target_channel_id)
     if channel is None:
         try:
-            channel = await bot.fetch_channel(group["channel_id"])
+            channel = await bot.fetch_channel(target_channel_id)
         except discord.HTTPException:
             return
     try:
@@ -918,7 +1149,10 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
             block = [f"### 🏟️ Gruppe {g['group_number']}", f"{bar} `{done}/{total_matches}`", ""]
             for i, s in enumerate(g["standings"]):
                 prefix = medals[i] if i < 3 else f"`{i + 1}.`"
-                block.append(f"{prefix} **{names.get(s['team_id'], '?')}** — `{s['wins']}` Siege")
+                block.append(
+                    f"{prefix} **{names.get(s['team_id'], '?')}** — `{s['wins']}` Siege · "
+                    f"Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
+                )
 
             open_matches = [m for m in matches if m["status"] != "completed"]
             if open_matches:
@@ -930,6 +1164,18 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
                 for m in open_matches:
                     block.append(
                         f"🔴 `ST {m['round']}` {m_names.get(m['team1_id'], '?')} 🆚 {m_names.get(m['team2_id'], '?')}"
+                    )
+
+            completed_matches = [m for m in matches if m["status"] == "completed"]
+            if completed_matches:
+                c_names = await team_name_map(
+                    [m["team1_id"] for m in completed_matches] + [m["team2_id"] for m in completed_matches]
+                )
+                block.append("")
+                block.append("**Ergebnisse:**")
+                for m in completed_matches:
+                    block.append(
+                        f"✅ `ST {m['round']}` {c_names.get(m['team1_id'], '?')} `{m['team1_score']}:{m['team2_score']}` {c_names.get(m['team2_id'], '?')}"
                     )
 
             items.append(discord.ui.TextDisplay("\n".join(block)))
@@ -1032,6 +1278,58 @@ async def send_matchday_reminder(channel: discord.abc.Messageable, matchday: int
         pass
 
 
+async def send_ko_round_reminder(channel: discord.abc.Messageable, round_label: str):
+    await asyncio.sleep(MATCHDAY_REMINDER_SECONDS)
+    try:
+        await channel.send(
+            f"⏰ 5 Minuten sind um - alle Teams müssen jetzt fürs **{round_label}** im Spiel sein."
+        )
+    except discord.HTTPException:
+        pass
+
+
+async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, matches: list[dict], round_label: str):
+    """
+    Postet die Paarungen einer KO-Runde mit EA-Club-Namen, Manager-Erwaehnungen und
+    5-Minuten-Timer - analog zu release_matchday() in der Gruppenphase.
+    """
+    team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
+    real_team_ids = set(tid for tid in team_ids if tid)
+    names = await team_name_map(list(real_team_ids))
+
+    ea_names: dict[int, str] = {}
+    manager_mentions: dict[int, str] = {}
+    for tid in real_team_ids:
+        team_row = await get_pool_team(tid)
+        ea_names[tid] = team_row.get("ea_club_name") or names.get(tid, "?")
+        managers = await get_team_managers(tid)
+        manager_mentions[tid] = " ".join(f"<@{m['discord_id']}>" for m in managers) or ""
+
+    pairing_lines = []
+    for m in matches:
+        if m["team1_id"] is None or m["team2_id"] is None:
+            real_team_id = m["team1_id"] or m["team2_id"]
+            pairing_lines.append(
+                f"- **{names.get(real_team_id, '?')}** {manager_mentions.get(real_team_id, '')} hat diese Runde "
+                "**Freilos** - kein Spiel nötig, gilt automatisch als erledigt."
+            )
+        else:
+            pairing_lines.append(
+                f"- **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} lädt "
+                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} ein "
+                f"(EA-Club-Namen: {ea_names.get(m['team1_id'], '?')} vs. {ea_names.get(m['team2_id'], '?')})"
+            )
+
+    text = (
+        f"📢 **{round_label} ist freigegeben!**\n"
+        + "\n".join(pairing_lines)
+        + "\n\nIhr habt jetzt **5 Minuten** Zeit, den Gegner ins Spiel einzuladen. "
+        "Sucht dabei genau nach dem oben genannten EA-Club-Namen."
+    )
+    await channel.send(text)
+    asyncio.create_task(send_ko_round_reminder(channel, round_label))
+
+
 async def build_group_schedule_image_for_round(group_id: int, round_num: int) -> discord.File | None:
     """Rendert NUR das Bild-Segment (max. 3 Spieltage), das den angegebenen Spieltag enthaelt."""
     pool = get_pool()
@@ -1078,7 +1376,6 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
     group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
     if not group:
         return
-    await pool.execute("UPDATE tournament_groups SET released_round = $1 WHERE id = $2", matchday, group_id)
 
     matches = await pool.fetch(
         "SELECT * FROM tournament_matches WHERE group_id = $1 AND round = $2 ORDER BY match_number", group_id, matchday
@@ -1126,6 +1423,7 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
 
     if channel:
         await channel.send(text)
+        await pool.execute("UPDATE tournament_groups SET released_round = $1 WHERE id = $2", matchday, group_id)
         asyncio.create_task(send_matchday_reminder(channel, matchday))
 
         try:
@@ -1188,6 +1486,11 @@ async def check_and_release_next_matchday(bot: commands.Bot, guild: discord.Guil
     if remaining > 0:
         return
     next_round = completed_round + 1
+
+    group = await pool.fetchrow("SELECT released_round FROM tournament_groups WHERE id = $1", group_id)
+    if group and group["released_round"] >= next_round:
+        return  # Naechster Spieltag ist schon freigegeben - keine erneute Freigabe (z.B. bei Korrektur eines alten Ergebnisses)
+
     exists = await pool.fetchval(
         "SELECT COUNT(*) FROM tournament_matches WHERE group_id = $1 AND round = $2", group_id, next_round
     )
@@ -1197,10 +1500,12 @@ async def check_and_release_next_matchday(bot: commands.Bot, guild: discord.Guil
 
 async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict):
     """
-    Teilt die angemeldeten Teams in Gruppen ein, legt pro Gruppe eine Rolle +
-    einen Textkanal an (nur fuer Team-Owner/Co-Manager der Gruppe sichtbar),
-    erstellt den Spielplan in echten Spieltagen (Kreisverfahren) und gibt
-    Spieltag 1 sofort frei.
+    Teilt die angemeldeten Teams in Gruppen ein (Auslosung), legt pro Gruppe
+    eine Rolle + einen Textkanal an (nur fuer Team-Owner/Co-Manager der Gruppe
+    sichtbar) und erstellt den Spielplan in echten Spieltagen (Kreisverfahren).
+    Gibt Spieltag 1 NICHT automatisch frei - das passiert erst separat ueber
+    release_first_matchday(), sobald der Admin bereit ist (z.B. zum offiziellen
+    Turnierstart).
     """
     pool = get_pool()
     registered = await get_registered_teams(tournament_id)
@@ -1262,13 +1567,11 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
 
         names = await team_name_map(real_team_ids)
         bye_note = f" (+ {len(group_team_ids) - len(real_team_ids)} Freilos)" if len(group_team_ids) > len(real_team_ids) else ""
-        intro_text = f"# Gruppe {idx}\nTeams: {', '.join(names.values())}{bye_note}"
+        intro_text = f"# 🎉 Gruppenauslosung — Gruppe {idx}\nTeams: {', '.join(names.values())}{bye_note}\n\n-# Der Spielplan wird in Kürze freigegeben."
         await channel.send(intro_text)
-        group_panel = await build_group_panel(group_id)
-        group_panel_msg = await channel.send(view=group_panel)
-        await pool.execute(
-            "UPDATE tournament_groups SET panel_message_id = $1 WHERE id = $2", group_panel_msg.id, group_id
-        )
+
+        group_row = {"id": group_id, "group_number": idx, "role_id": role.id, "channel_id": channel.id}
+        await create_group_panel_channel(guild, category, group_row)
 
         schedule = generate_group_schedule(group_team_ids)
         for matchday_idx, pairs in enumerate(schedule, start=1):
@@ -1283,15 +1586,20 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
                 match_number += 1
 
     await pool.execute("UPDATE tournaments SET phase = 'groups', status = 'started' WHERE id = $1", tournament_id)
+    await refresh_live_schedule(bot, guild, tournament_id)
 
-    for group_id in new_group_ids:
-        await release_matchday(bot, guild, group_id, 1)
 
+async def release_first_matchday(bot: commands.Bot, guild: discord.Guild, tournament_id: int):
+    """Gibt Spieltag 1 fuer alle Gruppen dieses Turniers frei. Separat vom Auslosen aufgerufen."""
+    pool = get_pool()
+    group_ids = await pool.fetch("SELECT id FROM tournament_groups WHERE tournament_id = $1", tournament_id)
+    for row in group_ids:
+        await release_matchday(bot, guild, row["id"], 1)
     await refresh_live_schedule(bot, guild, tournament_id)
 
 
 async def get_group_standings(tournament_id: int) -> list[dict]:
-    """Gibt pro Gruppe eine Liste mit Team-Namen und Siegen zurueck, sortiert."""
+    """Gibt pro Gruppe eine Liste mit Team-Namen, Siegen und Torverhaeltnis zurueck, sortiert."""
     pool = get_pool()
     groups = await pool.fetch(
         "SELECT * FROM tournament_groups WHERE tournament_id = $1 ORDER BY group_number", tournament_id
@@ -1307,8 +1615,25 @@ async def get_group_standings(tournament_id: int) -> list[dict]:
                 "SELECT COUNT(*) FROM tournament_matches WHERE group_id = $1 AND winner_id = $2",
                 g["id"], tr["team_id"],
             )
-            standings.append({"team_id": tr["team_id"], "wins": wins})
-        standings.sort(key=lambda x: x["wins"], reverse=True)
+            goals_row = await pool.fetchrow(
+                """
+                SELECT
+                  COALESCE(SUM(CASE WHEN team1_id = $2 THEN team1_score WHEN team2_id = $2 THEN team2_score ELSE 0 END), 0) AS goals_for,
+                  COALESCE(SUM(CASE WHEN team1_id = $2 THEN team2_score WHEN team2_id = $2 THEN team1_score ELSE 0 END), 0) AS goals_against
+                FROM tournament_matches
+                WHERE group_id = $1 AND status = 'completed' AND (team1_id = $2 OR team2_id = $2)
+                """,
+                g["id"], tr["team_id"],
+            )
+            goals_for = goals_row["goals_for"] or 0
+            goals_against = goals_row["goals_against"] or 0
+            standings.append({
+                "team_id": tr["team_id"], "wins": wins,
+                "goals_for": goals_for, "goals_against": goals_against,
+                "goal_diff": goals_for - goals_against,
+            })
+        # Sortierung: 1. Siege, 2. Torverhaeltnis (Tiebreaker), 3. geschossene Tore
+        standings.sort(key=lambda x: (x["wins"], x["goal_diff"], x["goals_for"]), reverse=True)
         result.append({"group_number": g["group_number"], "group_id": g["id"], "standings": standings})
     return result
 
@@ -1321,6 +1646,83 @@ async def all_groups_complete(tournament_id: int) -> bool:
     if not matches:
         return False
     return all(m["status"] == "completed" for m in matches)
+
+
+async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.ui.LayoutView:
+    """Zeigt den aktuellen Stand eines Brackets: laufende Runde, alle Paarungen mit Status/Ergebnis."""
+    pool = get_pool()
+    label = "🏆 Winner Bracket" if bracket == "winner" else "🥊 Loser Bracket"
+    matches = await pool.fetch(
+        """
+        SELECT * FROM tournament_matches WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2
+        ORDER BY round, match_number
+        """,
+        tournament_id, bracket,
+    )
+    view = discord.ui.LayoutView(timeout=None)
+    if not matches:
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(f"### {label}\n_Noch keine Paarungen._"), accent_color=discord.Color.gold()))
+        return view
+
+    ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
+    names = await team_name_map(ids)
+    block = [f"### {label}", ""]
+    current_round = None
+    for m in matches:
+        if m["round"] != current_round:
+            current_round = m["round"]
+            normal_matches_in_round = [mm for mm in matches if mm["round"] == current_round and not mm.get("is_third_place_match")]
+            third_place_in_round = any(mm.get("is_third_place_match") for mm in matches if mm["round"] == current_round)
+            if normal_matches_in_round:
+                block.append(f"**{round_name(len(normal_matches_in_round))}**")
+            if third_place_in_round:
+                block.append("**Spiel um Platz 3**")
+        t1 = names.get(m["team1_id"], "Freilos") if m["team1_id"] else "Freilos"
+        t2 = names.get(m["team2_id"], "Freilos") if m["team2_id"] else "Freilos"
+        if m["status"] == "completed" and m["team1_score"] is not None:
+            block.append(f"🟢 {t1} `{m['team1_score']}:{m['team2_score']}` {t2}")
+        else:
+            block.append(f"⏳ {t1} 🆚 {t2}")
+
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(block)), accent_color=discord.Color.gold()))
+    return view
+
+
+async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int, bracket: str, role: discord.Role) -> discord.TextChannel:
+    """Legt den 'nur Panel'-Kanal fuer ein Bracket an (z.B. 'winner-bracket-panel'), nur Bot darf dort schreiben."""
+    pool = get_pool()
+    overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
+    overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
+
+    panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], overwrites=overwrites)
+    panel = await build_bracket_panel_view(tournament_id, bracket)
+    msg = await panel_channel.send(view=panel)
+    await pool.execute(
+        "UPDATE tournament_bracket_meta SET panel_channel_id = $1, panel_message_id = $2 WHERE tournament_id = $3 AND bracket = $4",
+        panel_channel.id, msg.id, tournament_id, bracket,
+    )
+    return panel_channel
+
+
+async def refresh_bracket_panel(bot: commands.Bot, tournament_id: int, bracket: str):
+    pool = get_pool()
+    meta = await pool.fetchrow(
+        "SELECT * FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2", tournament_id, bracket
+    )
+    if not meta or not meta["panel_channel_id"] or not meta["panel_message_id"]:
+        return
+    channel = bot.get_channel(meta["panel_channel_id"])
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(meta["panel_channel_id"])
+        except discord.HTTPException:
+            return
+    try:
+        msg = await channel.fetch_message(meta["panel_message_id"])
+    except discord.HTTPException:
+        return
+    panel = await build_bracket_panel_view(tournament_id, bracket)
+    await msg.edit(view=panel)
 
 
 async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int]) -> list[dict]:
@@ -1343,8 +1745,9 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
         )
         return [dict(m) for m in existing_matches]
 
+    # team_ids kommt bereits nach Seed sortiert an (bestes Team zuerst) - siehe
+    # start_knockout_phase / _seed_key. NICHT mehr mischen, sonst geht das Seeding verloren.
     team_ids = list(team_ids)
-    random.shuffle(team_ids)
 
     label = "Winner-Bracket" if bracket == "winner" else "Loser-Bracket"
     try:
@@ -1405,10 +1808,16 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
     is_prelim = excess > 0
 
     if is_prelim:
-        prelim_participants = team_ids[: 2 * excess]
-        direct_entrants = team_ids[2 * excess:]
-        for i in range(0, len(prelim_participants), 2):
-            team1, team2 = prelim_participants[i], prelim_participants[i + 1]
+        # Beste Seeds steigen direkt in die Hauptrunde ein, die schlechtesten 2*excess
+        # Seeds spielen die Qualifikationsrunde - seed-gepaart (bester vs. schlechtester
+        # der Quali-Teilnehmer), damit sich keine zwei starken Teams unnoetig frueh treffen.
+        direct_entrants = team_ids[: n - 2 * excess]
+        prelim_participants = team_ids[n - 2 * excess:]
+        pairs = [
+            (prelim_participants[i], prelim_participants[len(prelim_participants) - 1 - i])
+            for i in range(len(prelim_participants) // 2)
+        ]
+        for team1, team2 in pairs:
             row = await pool.fetchrow(
                 """
                 INSERT INTO tournament_matches (tournament_id, round, match_number, team1_id, team2_id, status, phase, bracket)
@@ -1428,8 +1837,10 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
         )
         round_label = "Qualifikationsrunde"
     else:
-        for i in range(0, len(team_ids), 2):
-            team1, team2 = team_ids[i], team_ids[i + 1]
+        # Kein Ueberschuss (Teamzahl schon Zweierpotenz) - trotzdem seed-gepaart
+        # (bester vs. schlechtester Seed), nicht einfach Reihenfolge-nach-nebeneinander.
+        pairs = [(team_ids[i], team_ids[len(team_ids) - 1 - i]) for i in range(len(team_ids) // 2)]
+        for team1, team2 in pairs:
             row = await pool.fetchrow(
                 """
                 INSERT INTO tournament_matches (tournament_id, round, match_number, team1_id, team2_id, status, phase, bracket)
@@ -1446,19 +1857,17 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
         round_label = round_name(len(matches))
 
     names = await team_name_map(team_ids)
-    text = (
-        f"# {label} - {t['name']}\n"
-        f"Teams: {', '.join(names.values())}\n\n"
-        f"## {round_label}\n"
-        + "\n".join(
-            f"**Match {m['match_number']}:** {names.get(m['team1_id'], '?')} vs {names.get(m['team2_id'], '?')}"
-            for m in matches
-        )
-    )
+    intro_text = f"# {label} - {t['name']}\nTeams: {', '.join(names.values())}"
     if is_prelim:
-        text += f"\n\n_Direkt qualifiziert für die nächste Runde: {', '.join(names.get(tid, '?') for tid in direct_entrants)}_"
-    await channel.send(text)
+        intro_text += f"\n\n_Direkt qualifiziert für die nächste Runde: {', '.join(names.get(tid, '?') for tid in direct_entrants)}_"
+    await channel.send(intro_text)
+    await release_ko_round(bot, channel, matches, round_label)
     await channel.send(view=build_bracket_actions_view(tournament_id, bracket))
+
+    try:
+        await create_bracket_panel_channel(guild, tournament_id, bracket, role)
+    except Exception:
+        log.exception(f"Fehler beim Erstellen des Panel-Kanals fuer Bracket '{bracket}' (Turnier {tournament_id})")
 
     return matches
 
@@ -1560,15 +1969,34 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     if claimed is None:
         return  # Ein anderer Aufruf hat die KO-Phase bereits gestartet
 
+    withdrawn_rows = await pool.fetch(
+        "SELECT team_id FROM tournament_signups WHERE tournament_id = $1 AND status = 'withdrawn'", tournament_id
+    )
+    withdrawn_team_ids = {r["team_id"] for r in withdrawn_rows}
+
     standings = await get_group_standings(tournament_id)
 
-    winner_teams: list[int] = []
-    loser_teams: list[int] = []
+    winner_seeds: list[dict] = []
+    loser_seeds: list[dict] = []
     for g in standings:
-        group_len = len(g["standings"])
-        winner_n = group_len // 2  # 4er-Gruppe -> 2, 6er-Gruppe -> 3
-        winner_teams += [s["team_id"] for s in g["standings"][:winner_n]]
-        loser_teams += [s["team_id"] for s in g["standings"][winner_n:]]
+        eligible = [s for s in g["standings"] if s["team_id"] not in withdrawn_team_ids]
+        winner_n = len(g["standings"]) // 2  # 4er-Gruppe -> 2, 6er-Gruppe -> 3 (Sollgroesse bleibt gleich)
+        for tier, s in enumerate(eligible[:winner_n]):
+            winner_seeds.append({**s, "tier": tier})
+        for tier, s in enumerate(eligible[winner_n:]):
+            loser_seeds.append({**s, "tier": tier})
+
+    # Seeding gruppenuebergreifend: erst Gruppenplatz (alle Gruppensieger vor allen
+    # Gruppenzweiten usw.), bei gleichem Platz dann Siege/Tordifferenz/Tore. Sonst
+    # koennte ein Gruppenzweiter vor einem Gruppenersten mit klar besserer Bilanz
+    # direkt in die KO-Hauptrunde rutschen, waehrend der Erste in die Quali muss.
+    def _seed_key(s):
+        return (s["tier"], -s["wins"], -s["goal_diff"], -s["goals_for"])
+
+    winner_seeds.sort(key=_seed_key)
+    loser_seeds.sort(key=_seed_key)
+    winner_teams = [s["team_id"] for s in winner_seeds]
+    loser_teams = [s["team_id"] for s in loser_seeds]
 
     await create_bracket(bot, guild, tournament_id, t, "winner", winner_teams)
     await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams)
@@ -1618,6 +2046,7 @@ def estimate_schedule(t: dict, registered_count: int) -> dict:
     start = t.get("start_time")
     if not start:
         return {}
+    start = start.astimezone(BERLIN_TZ)  # Postgres liefert TIMESTAMPTZ als UTC zurueck - zurueck auf Berlin-Zeit umrechnen
     rhythmus = t.get("minutes_per_round") or 20
 
     anmeldeschluss = start - timedelta(hours=2)
@@ -1945,6 +2374,15 @@ class TournamentStreamLinkModal(discord.ui.Modal, title="Stream-Link ändern"):
         self.stream_link.default = current or ""
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.stream_link.value and not is_valid_twitch_link(self.stream_link.value):
+            await interaction.response.send_message(
+                view=error_embed(
+                    "Das ist kein gültiger Twitch-Link.",
+                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                ),
+                ephemeral=True,
+            )
+            return
         pool = get_pool()
         await pool.execute("UPDATE tournaments SET stream_link = $1 WHERE id = $2", self.stream_link.value or None, self.tournament_id)
         await refresh_panel(interaction.client, self.tournament_id)
@@ -1968,7 +2406,7 @@ class TournamentCog(commands.Cog):
             return
 
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        is_admin = await is_tournament_admin(interaction.user)
+        is_admin = await is_tournament_moderator(interaction.user)
 
         if action == "played":
             if not team:
@@ -2008,6 +2446,23 @@ class TournamentCog(commands.Cog):
                 )
             )
 
+        elif action == "ready":
+            if not team:
+                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
+                return
+            row = await pool.fetchrow(
+                "SELECT 1 FROM tournament_group_teams WHERE group_id = $1 AND team_id = $2", group_id, team["id"]
+            )
+            if not row:
+                await interaction.response.send_message(view=error_embed("Dein Team ist nicht in dieser Gruppe."), ephemeral=True)
+                return
+            await pool.execute(
+                "UPDATE tournament_group_teams SET confirmed_ready = true WHERE group_id = $1 AND team_id = $2",
+                group_id, team["id"],
+            )
+            await refresh_group_panel(self.bot, group_id)
+            await interaction.response.send_message(view=success_embed(f"{team['name']} ist bereit! ✅"), ephemeral=True)
+
         elif action == "report":
             if is_admin:
                 matches = await get_open_matches_in_group(group_id)
@@ -2043,7 +2498,10 @@ class TournamentCog(commands.Cog):
             opponent_team_id = match["team2_id"] if match["team1_id"] == team["id"] else match["team1_id"]
             opponent_managers = await get_team_managers(opponent_team_id)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in opponent_managers) or "(kein Manager gefunden)"
-            await interaction.response.send_message(content=mentions, view=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
+            text = f"{mentions}\n### 📹 Größenvideo wurde vom Gegner gefordert."
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
+            await interaction.response.send_message(view=view)
 
             for m in opponent_managers:
                 try:
@@ -2067,7 +2525,7 @@ class TournamentCog(commands.Cog):
             return
 
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        is_admin = await is_tournament_admin(interaction.user)
+        is_admin = await is_tournament_moderator(interaction.user)
 
         if action == "played":
             if not team:
@@ -2142,7 +2600,10 @@ class TournamentCog(commands.Cog):
             opponent_team_id = match["team2_id"] if match["team1_id"] == team["id"] else match["team1_id"]
             opponent_managers = await get_team_managers(opponent_team_id)
             mentions = " ".join(f"<@{m['discord_id']}>" for m in opponent_managers) or "(kein Manager gefunden)"
-            await interaction.response.send_message(content=mentions, view=info_embed("📹 Größenvideo wurde vom Gegner gefordert."))
+            text = f"{mentions}\n### 📹 Größenvideo wurde vom Gegner gefordert."
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
+            await interaction.response.send_message(view=view)
 
             for m in opponent_managers:
                 try:
@@ -2168,7 +2629,7 @@ class TournamentCog(commands.Cog):
         reporter_team_id = match["reported_by_team_id"]
         opponent_team_id = match["team2_id"] if reporter_team_id == match["team1_id"] else match["team1_id"]
         role = await get_role_for_user(opponent_team_id, interaction.user.id)
-        is_admin = await is_tournament_admin(interaction.user)
+        is_admin = await is_tournament_moderator(interaction.user)
         if not role and not is_admin:
             await interaction.response.send_message(
                 view=error_embed("Nur der Manager des Gegner-Teams (oder ein Admin) kann dieses Ergebnis bestätigen."), ephemeral=True

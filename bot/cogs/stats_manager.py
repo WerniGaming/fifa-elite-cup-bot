@@ -10,6 +10,7 @@ Match wird einzeln bei der EA-API abgefragt, das soll nicht ungefragt im
 Hintergrund laufen (Proxy-Traffic, Zeit).
 """
 from __future__ import annotations
+import io
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -91,7 +92,7 @@ async def try_fetch_ea_full_match(team1: dict, team2: dict) -> dict | None:
         async with EAProClubsAPI() as api:
             matches = await api.get_matches(
                 team1["ea_club_id"], team1.get("ea_platform") or "common-gen5",
-                match_type="friendlyMatch", max_results=20,
+            match_type="friendlyMatch", max_results=100,
             )
     except Exception:
         return None
@@ -135,17 +136,21 @@ async def get_matches_for_teams(tournament_id: int, team_ids: list[int]) -> list
     return [dict(r) for r in rows]
 
 
-async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> dict[str, PlayerAgg]:
+async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> tuple[dict[str, PlayerAgg], int, int]:
     """
     Holt fuer alle Teams eines Brackets (Winner/Loser) die kompletten Turnier-Matches
     (Gruppenphase + KO), zieht die echten EA-Spielerdaten und aggregiert sie.
+    Gibt (Aggregation, gefundene_Matches, Matches_gesamt) zurueck.
     """
     team_ids = await get_bracket_team_ids(tournament_id, bracket)
+    team_ids_set = set(team_ids)
     matches = await get_matches_for_teams(tournament_id, team_ids)
 
     team_cache: dict[int, dict] = {}
     agg: dict[str, PlayerAgg] = {}
     checked_pairs = set()
+    found_count = 0
+    total_count = 0
 
     for m in matches:
         t1_id, t2_id = m["team1_id"], m["team2_id"]
@@ -153,6 +158,7 @@ async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> dict[str,
         if pair_key in checked_pairs:
             continue
         checked_pairs.add(pair_key)
+        total_count += 1
 
         if t1_id not in team_cache:
             team_cache[t1_id] = await get_pool_team(t1_id)
@@ -163,9 +169,15 @@ async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> dict[str,
         ea_match = await try_fetch_ea_full_match(team1, team2)
         if not ea_match:
             continue
+        found_count += 1
 
         players_by_club = ea_match.get("players", {})
         for team_row, team_id in ((team1, t1_id), (team2, t2_id)):
+            # Gruppenspiele sind immer bracket='winner' getaggt, auch wenn der Gegner
+            # spaeter ins Loser-Bracket eingeteilt wird - hier den Gegner ausschliessen,
+            # sonst tauchen Loser-Bracket-Spieler in der Winner-Bracket-Auswertung auf.
+            if team_id not in team_ids_set:
+                continue
             club_players = players_by_club.get(str(team_row.get("ea_club_id")))
             if not club_players:
                 continue
@@ -184,7 +196,7 @@ async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> dict[str,
                 raw_pos = p.get("position") or p.get("pos") or ""
                 entry.positions[_position_group(raw_pos)] += 1
 
-    return agg
+    return agg, found_count, total_count
 
 
 def compute_awards(agg: dict[str, PlayerAgg]) -> dict[str, PlayerAgg]:
@@ -277,6 +289,53 @@ async def build_top11_embed(tournament_id: int, bracket: str, top11: dict[str, l
     return embed
 
 
+async def team_logo_map(team_ids: list[int]) -> dict[int, str | None]:
+    ids = [i for i in team_ids if i is not None]
+    if not ids:
+        return {}
+    pool = get_pool()
+    rows = await pool.fetch("SELECT id, logo_url FROM teams WHERE id = ANY($1::int[])", ids)
+    return {r["id"]: r["logo_url"] for r in rows}
+
+
+async def build_awards_image(tournament_id: int, bracket: str, awards: dict[str, PlayerAgg]) -> io.BytesIO | None:
+    if not awards:
+        return None
+    t = await get_tournament(tournament_id)
+    label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+    team_names = await team_name_map([p.team_id for p in awards.values()])
+    team_logos = await team_logo_map([p.team_id for p in awards.values()])
+    metric_texts = {
+        "Bester Spieler": lambda p: f"Score {p.score:.1f}",
+        "Bester Torschütze": lambda p: f"{p.goals} Tore",
+        "Bester Aufleger": lambda p: f"{p.assists} Vorlagen",
+        "Bester Verteidiger": lambda p: f"Score {p.score:.1f}",
+        "Goldener Handschuh": lambda p: f"Score {p.score:.1f}",
+    }
+    entries = [
+        (award_name, p.name, team_names.get(p.team_id, "?"), metric_texts[award_name](p), team_logos.get(p.team_id))
+        for award_name, p in awards.items()
+    ]
+    from graphics import render_awards_image
+    return await render_awards_image(f"🏆 Turnier-Awards — {label}", t["name"], entries)
+
+
+async def build_top11_image(tournament_id: int, bracket: str, top11: dict[str, list[PlayerAgg]]) -> io.BytesIO | None:
+    all_players = [p for group in top11.values() for p in group]
+    if not all_players:
+        return None
+    t = await get_tournament(tournament_id)
+    label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+    team_names = await team_name_map([p.team_id for p in all_players])
+    team_logos = await team_logo_map([p.team_id for p in all_players])
+    formation_slots = {
+        group: [(p.name, team_names.get(p.team_id, "?"), team_logos.get(p.team_id)) for p in players]
+        for group, players in top11.items()
+    }
+    from graphics import render_top11_image
+    return await render_top11_image(f"⭐ Team des Turniers — {label}", f"{t['name']} · Formation 3-5-2", formation_slots)
+
+
 async def get_guild_settings(guild_id: int) -> dict:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM guild_settings WHERE guild_id = $1", guild_id)
@@ -318,18 +377,27 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
         embed = await build_bracket_finish_embed(tournament_id, champion_id, bracket)
         await top3_channel.send(embed=embed)
 
-    agg = await aggregate_bracket_stats(tournament_id, bracket)
+    agg, found_count, total_count = await aggregate_bracket_stats(tournament_id, bracket)
     awards = compute_awards(agg)
     top11 = compute_top11(agg)
 
     if awards_channel:
-        await awards_channel.send(embed=await build_awards_embed(tournament_id, bracket, awards))
+        image = await build_awards_image(tournament_id, bracket, awards)
+        if image:
+            await awards_channel.send(file=discord.File(image, filename="awards.png"))
+        else:
+            await awards_channel.send(embed=await build_awards_embed(tournament_id, bracket, awards))
     if top11_channel:
-        await top11_channel.send(embed=await build_top11_embed(tournament_id, bracket, top11))
+        image = await build_top11_image(tournament_id, bracket, top11)
+        if image:
+            await top11_channel.send(file=discord.File(image, filename="top11.png"))
+        else:
+            await top11_channel.send(embed=await build_top11_embed(tournament_id, bracket, top11))
 
+    coverage = f"{found_count}/{total_count} Spiele mit EA-Daten gefunden"
     if not agg:
-        return "Top3 gepostet, aber keine EA-Match-Daten für Awards/Top-11 gefunden (Matches evtl. außerhalb der letzten 20 Freundschaftsspiele)."
-    return f"✅ Statistiken gepostet ({len(agg)} Spieler erfasst)."
+        return f"Top3 gepostet, aber keine EA-Match-Daten für Awards/Top-11 gefunden ({coverage})."
+    return f"✅ Statistiken gepostet ({len(agg)} Spieler erfasst, {coverage})."
 
 
 class StatsChannelsConfigView(discord.ui.View):
@@ -343,6 +411,7 @@ class StatsChannelsConfigView(discord.ui.View):
         ("bans_log_channel_id", "Sperren-Log"),
         ("live_schedule_channel_id", "Live-Spielplan"),
         ("logo_storage_channel_id", "Logo-Speicher"),
+        ("stream_list_channel_id", "Stream-Übersicht"),
     ]
 
     def __init__(self, guild_id: int, fields=None):

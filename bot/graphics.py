@@ -128,6 +128,121 @@ async def _render_single_image(matchdays_chunk: list[list[dict]], session: aioht
     return buf
 
 
+GOLD = (255, 215, 80)
+DARK_BG = (16, 18, 24)
+CARD_BG = (28, 31, 40)
+WHITE = (235, 235, 240)
+GREY = (150, 150, 160)
+PITCH_GREEN = (24, 92, 48)
+PITCH_LINE = (230, 230, 230)
+
+
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(FONT_BOLD, size)
+
+
+def _text_size(draw: ImageDraw.ImageDraw, text: str, font) -> tuple[int, int]:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str, str, str, str, str | None]]) -> io.BytesIO:
+    """
+    Einfaches generisches Karten-Layout (kein Template vorhanden).
+    awards: Liste von (award_name, player_name, team_name, stat_text, logo_url).
+    """
+    row_h = 130
+    width = 900
+    height = 170 + row_h * max(1, len(awards))
+    img = Image.new("RGB", (width, height), DARK_BG)
+    draw = ImageDraw.Draw(img)
+
+    draw.text((40, 30), title, font=_font(36), fill=GOLD)
+    draw.text((40, 78), subtitle, font=_font(20), fill=GREY)
+    draw.line([(40, 120), (width - 40, 120)], fill=GOLD, width=2)
+
+    async with aiohttp.ClientSession() as session:
+        y = 150
+        for award_name, player_name, team_name, stat_text, logo_url in awards:
+            draw.rounded_rectangle([(40, y), (width - 40, y + row_h - 20)], radius=14, fill=CARD_BG)
+            logo = await _fetch_logo(session, logo_url, team_name)
+            _paste_logo(img, logo, (55, y + 15, 55 + (row_h - 50), y + row_h - 35))
+            text_x = 55 + (row_h - 50) + 20
+            draw.text((text_x, y + 12), award_name, font=_font(18), fill=GOLD)
+            draw.text((text_x, y + 40), player_name, font=_font(26), fill=WHITE)
+            draw.text((text_x, y + 74), f"{team_name} · {stat_text}", font=_font(18), fill=GREY)
+            y += row_h
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# Formation-Positionen (3-5-2), Anteile der Bildbreite/-hoehe (0..1), von oben (Sturm) nach unten (Tor)
+TOP11_LAYOUT = {
+    "FWD": [(0.32, 0.16), (0.68, 0.16)],
+    "MID": [(0.12, 0.40), (0.32, 0.40), (0.5, 0.40), (0.68, 0.40), (0.88, 0.40)],
+    "DEF": [(0.25, 0.64), (0.5, 0.64), (0.75, 0.64)],
+    "GK": [(0.5, 0.86)],
+}
+
+
+async def render_top11_image(title: str, subtitle: str, formation_slots: dict[str, list[tuple[str, str, str | None]]]) -> io.BytesIO:
+    """
+    Einfaches generisches Fußballfeld-Layout (3-5-2), kein Template vorhanden.
+    formation_slots: {"GK": [(player_name, team_name, logo_url)], "DEF": [...], "MID": [...], "FWD": [...]}
+    """
+    width, height = 1000, 1300
+    img = Image.new("RGB", (width, height), PITCH_GREEN)
+    draw = ImageDraw.Draw(img)
+
+    header_h = 110
+    draw.rectangle([(0, 0), (width, header_h)], fill=DARK_BG)
+    draw.text((40, 20), title, font=_font(34), fill=GOLD)
+    draw.text((40, 66), subtitle, font=_font(18), fill=GREY)
+
+    pitch_top = header_h + 20
+    draw.rectangle([(20, pitch_top), (width - 20, height - 20)], outline=PITCH_LINE, width=4)
+    mid_y = pitch_top + (height - 20 - pitch_top) // 2
+    draw.line([(20, mid_y), (width - 20, mid_y)], fill=PITCH_LINE, width=3)
+    draw.ellipse([(width / 2 - 90, mid_y - 90), (width / 2 + 90, mid_y + 90)], outline=PITCH_LINE, width=3)
+    draw.rectangle([(width / 2 - 180, height - 20 - 140), (width / 2 + 180, height - 20)], outline=PITCH_LINE, width=3)
+
+    logo_size = 70
+    async with aiohttp.ClientSession() as session:
+        for group, slots in TOP11_LAYOUT.items():
+            players = formation_slots.get(group, [])
+            for i, (fx, fy) in enumerate(slots):
+                if i >= len(players):
+                    continue
+                player_name, team_name, logo_url = players[i]
+                cx = int(fx * width)
+                cy = pitch_top + int(fy * (height - 20 - pitch_top))
+
+                logo = await _fetch_logo(session, logo_url, team_name)
+                if logo:
+                    _paste_logo(img, logo, (cx - logo_size // 2, cy - logo_size // 2, cx + logo_size // 2, cy + logo_size // 2))
+                else:
+                    draw.ellipse(
+                        [(cx - logo_size // 2, cy - logo_size // 2), (cx + logo_size // 2, cy + logo_size // 2)],
+                        fill=CARD_BG, outline=GOLD, width=2,
+                    )
+
+                name_font = _font(20)
+                tw, _ = _text_size(draw, player_name, name_font)
+                label_y = cy + logo_size // 2 + 8
+                draw.rounded_rectangle(
+                    [(cx - tw / 2 - 10, label_y), (cx + tw / 2 + 10, label_y + 30)], radius=6, fill=DARK_BG
+                )
+                draw.text((cx - tw / 2, label_y + 4), player_name, font=name_font, fill=WHITE)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 async def generate_group_schedule_images(matchdays: list[list[dict]]) -> list[io.BytesIO]:
     """
     matchdays: eine Liste mit EINEM Eintrag pro Spieltag (beliebig viele,
