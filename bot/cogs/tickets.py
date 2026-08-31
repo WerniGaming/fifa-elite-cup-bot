@@ -9,6 +9,7 @@ selbst gibt es Buttons zum Uebernehmen und Schliessen (mit Transkript-Log).
 from __future__ import annotations
 import io
 import logging
+import os
 
 import discord
 from discord import app_commands
@@ -19,6 +20,8 @@ from permissions import is_tournament_admin, is_ticket_support
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed
 
 log = logging.getLogger("fifa-elite-cup")
+
+BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "ticket_banner.jpg")
 
 TICKET_CATEGORIES = [
     ("frage", "❓ Allgemeine Frage", "Fragen zum Server, Ablauf oder allgemeine Anliegen"),
@@ -62,7 +65,13 @@ class TicketPanel(discord.ui.LayoutView):
             ],
             custom_id="ticket:open_select",
         )
+        media_items = []
+        if os.path.exists(BANNER_PATH):
+            self.banner_file = discord.File(BANNER_PATH, filename="ticket_banner.jpg")
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+
         container = discord.ui.Container(
+            *media_items,
             intro,
             discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
             howto_block,
@@ -405,7 +414,11 @@ class TicketsCog(commands.Cog):
             await interaction.response.send_message(view=error_embed("Nur Admins können das Ticket-Panel posten."), ephemeral=True)
             return
         await interaction.response.send_message(view=success_embed("Ticket-Panel wird gepostet..."), ephemeral=True)
-        await interaction.channel.send(view=TicketPanel())
+        panel = TicketPanel()
+        if hasattr(panel, "banner_file"):
+            await interaction.channel.send(view=panel, files=[panel.banner_file])
+        else:
+            await interaction.channel.send(view=panel)
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):

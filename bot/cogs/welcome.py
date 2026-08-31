@@ -3,12 +3,15 @@ Willkommens-Panel-Cog: postet eine einmalige, schoen gestaltete Eingangs-
 Nachricht (Components V2) fuer neue Mitglieder.
 """
 from __future__ import annotations
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from permissions import is_tournament_admin
 from ui_helpers import error_embed, success_embed
+
+BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "welcome_banner.jpg")
 
 
 class WelcomePanel(discord.ui.LayoutView):
@@ -46,7 +49,13 @@ class WelcomePanel(discord.ui.LayoutView):
             "-# FIFA Elite Cup"
         )
 
+        media_items = []
+        if os.path.exists(BANNER_PATH):
+            self.banner_file = discord.File(BANNER_PATH, filename="welcome_banner.jpg")
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+
         container = discord.ui.Container(
+            *media_items,
             intro,
             discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
             team_block,
@@ -73,7 +82,11 @@ class WelcomeCog(commands.Cog):
             return
         channel_id = team_manager_channel.id if team_manager_channel else None
         await interaction.response.send_message(view=success_embed("Willkommens-Nachricht wird gepostet..."), ephemeral=True)
-        await interaction.channel.send(view=WelcomePanel(channel_id))
+        panel = WelcomePanel(channel_id)
+        if hasattr(panel, "banner_file"):
+            await interaction.channel.send(view=panel, files=[panel.banner_file])
+        else:
+            await interaction.channel.send(view=panel)
 
 
 async def setup(bot: commands.Bot):

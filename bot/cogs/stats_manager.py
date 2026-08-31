@@ -24,7 +24,7 @@ from cogs.tournament_manager import (
     get_tournament,
     get_pool_team,
     team_name_map,
-    build_bracket_finish_embed,
+    build_bracket_finish_file,
 )
 
 POSITION_GROUPS = {
@@ -374,8 +374,8 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
     top11_channel = await get_ch(top11_channel_id)
 
     if top3_channel:
-        embed = await build_bracket_finish_embed(tournament_id, champion_id, bracket)
-        await top3_channel.send(embed=embed)
+        podium_file = await build_bracket_finish_file(tournament_id, champion_id, bracket)
+        await top3_channel.send(file=podium_file)
 
     agg, found_count, total_count = await aggregate_bracket_stats(tournament_id, bracket)
     awards = compute_awards(agg)

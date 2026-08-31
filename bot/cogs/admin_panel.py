@@ -11,6 +11,7 @@ Alle Antworten des Bots werden als Embeds gestaltet (statt reinem Text).
 """
 from __future__ import annotations
 import logging
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -1179,6 +1180,9 @@ class DMBroadcastModal(discord.ui.Modal, title="DM an alle Vereinsmanager"):
         )
 
 
+ADMIN_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "admin_banner.jpg")
+
+
 class AdminPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1192,7 +1196,12 @@ class AdminPanel(discord.ui.LayoutView):
             "**📣 Kommunikation** — eigene Ankündigungen posten, DM an alle Vereinsmanager\n"
             "**⚙️ System** — Stats-Kanäle, Rollen (Admin/Moderator/VM/Co-Manager), Nicknames, Stream-Liste"
         )
+        media_items = []
+        if os.path.exists(ADMIN_BANNER_PATH):
+            self.banner_file = discord.File(ADMIN_BANNER_PATH, filename="admin_banner.jpg")
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
         container = discord.ui.Container(
+            *media_items,
             intro,
             discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
             categories,
@@ -1220,7 +1229,11 @@ class AdminPanelCog(commands.Cog):
             await interaction.response.send_message(view=error_embed("Nur Admins können das Admin-Panel posten."), ephemeral=True)
             return
         await interaction.response.send_message(view=success_embed("Admin-Panel wird gepostet..."), ephemeral=True)
-        await interaction.channel.send(view=AdminPanel())
+        panel = AdminPanel()
+        if hasattr(panel, "banner_file"):
+            await interaction.channel.send(view=panel, files=[panel.banner_file])
+        else:
+            await interaction.channel.send(view=panel)
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):

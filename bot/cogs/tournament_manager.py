@@ -566,8 +566,8 @@ async def try_fetch_ea_result(team1: dict, team2: dict) -> tuple[int, int] | Non
     return None
 
 
-async def build_bracket_finish_embed(tournament_id: int, champion_id: int, bracket: str) -> discord.Embed:
-    """Baut die Abschluss-Nachricht fuer EIN Bracket: Erster/Zweiter/Dritter (soweit ermittelbar)."""
+async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracket: str) -> discord.File:
+    """Podium-Grafik fuer den Bracket-Abschluss: Erster/Zweiter/Dritter (soweit ermittelbar)."""
     pool = get_pool()
     t = await get_tournament(tournament_id)
     bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
@@ -580,13 +580,11 @@ async def build_bracket_finish_embed(tournament_id: int, champion_id: int, brack
         """,
         tournament_id, bracket, champion_id,
     )
-    runner_up_id = None
-    final_round = None
+    runner_up_id, final_round = None, None
     if final_match:
         runner_up_id = final_match["team2_id"] if final_match["team1_id"] == champion_id else final_match["team1_id"]
         final_round = final_match["round"]
 
-    third_place_id = None
     third_place_column = "winner_bracket_third_id" if bracket == "winner" else "loser_bracket_third_id"
     third_place_id = t.get(third_place_column)
     if third_place_id is None and final_round and final_round > 1:
@@ -605,17 +603,18 @@ async def build_bracket_finish_embed(tournament_id: int, champion_id: int, brack
         if losers:
             third_place_id = losers[0]
 
-    ids = [champion_id, runner_up_id, third_place_id]
-    names = await team_name_map([i for i in ids if i])
+    ids = [i for i in (champion_id, runner_up_id, third_place_id) if i]
+    team_rows = {tid: await get_pool_team(tid) for tid in ids}
 
-    embed = discord.Embed(title=f"🏆 {bracket_label} Champion", description=t["name"], color=discord.Color.gold())
-    embed.add_field(name="🥇 Erster", value=names.get(champion_id, "?"), inline=False)
+    places = {1: (team_rows[champion_id]["name"], team_rows[champion_id].get("logo_url"))}
     if runner_up_id:
-        embed.add_field(name="🥈 Zweiter", value=names.get(runner_up_id, "?"), inline=False)
+        places[2] = (team_rows[runner_up_id]["name"], team_rows[runner_up_id].get("logo_url"))
     if third_place_id:
-        embed.add_field(name="🥉 Dritter", value=names.get(third_place_id, "?"), inline=False)
+        places[3] = (team_rows[third_place_id]["name"], team_rows[third_place_id].get("logo_url"))
 
-    return embed
+    from graphics import render_podium_image
+    buf = await render_podium_image(f"🏆 {bracket_label} Champion", t["name"], places)
+    return discord.File(buf, filename="podium.png")
 
 
 async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_id: int, score1: int, score2: int):
@@ -695,9 +694,9 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
 
     if result[0] == "finished":
         _, champion_id, _ = result
-        embed = await build_bracket_finish_embed(match["tournament_id"], champion_id, bracket)
+        podium_file = await build_bracket_finish_file(match["tournament_id"], champion_id, bracket)
         if bracket_channel:
-            await bracket_channel.send(embed=embed)
+            await bracket_channel.send(file=podium_file)
 
         champion_field = "winner_champion_id" if bracket == "winner" else "loser_champion_id"
         await pool2.execute(f"UPDATE tournaments SET {champion_field} = $1 WHERE id = $2", champion_id, match["tournament_id"])
@@ -1081,10 +1080,59 @@ async def build_group_schedule_matchdays(group_id: int) -> list[list[dict]]:
 
 
 async def build_group_schedule_file(group: dict) -> discord.File:
-    from graphics import render_group_schedule_image
+    from graphics import render_schedule_image
     matchdays = await build_group_schedule_matchdays(group["id"])
-    buf = await render_group_schedule_image(f"Gruppe {group['group_number']}", matchdays)
+    sections = [(f"Spieltag {i}", md) for i, md in enumerate(matchdays, start=1)]
+    buf = await render_schedule_image(f"Spielplan — Gruppe {group['group_number']}", sections)
     return discord.File(buf, filename="spielplan.png")
+
+
+async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> list[tuple[str, list[dict]]]:
+    """Alle Matches eines Brackets, nach Runde gruppiert mit deutschem Rundennamen, inkl. Ergebnis."""
+    pool = get_pool()
+    matches = await pool.fetch(
+        """
+        SELECT * FROM tournament_matches WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2
+        ORDER BY round, match_number
+        """,
+        tournament_id, bracket,
+    )
+    if not matches:
+        return []
+    team_ids = {m["team1_id"] for m in matches if m["team1_id"]} | {m["team2_id"] for m in matches if m["team2_id"]}
+    team_rows = {tid: await get_pool_team(tid) for tid in team_ids}
+
+    sections: list[tuple[str, list[dict]]] = []
+    current_round = None
+    current_matches: list[dict] = []
+    for m in matches:
+        if m["round"] != current_round:
+            if current_matches:
+                label = "Spiel um Platz 3" if all(mm.get("is_third_place_match") for mm in current_matches) else round_name(len(current_matches))
+                sections.append((label, current_matches))
+            current_round = m["round"]
+            current_matches = []
+        t1 = team_rows.get(m["team1_id"]) or {"name": "Freilos", "logo_url": None}
+        t2 = team_rows.get(m["team2_id"]) or {"name": "Freilos", "logo_url": None}
+        current_matches.append({
+            "team1_name": t1["name"], "team2_name": t2["name"],
+            "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
+            "team1_score": m["team1_score"], "team2_score": m["team2_score"], "status": m["status"],
+        })
+    if current_matches:
+        label = "Spiel um Platz 3" if all(mm.get("is_third_place_match") for mm in current_matches) else round_name(len(current_matches))
+        sections.append((label, current_matches))
+    return sections
+
+
+async def build_bracket_schedule_file(tournament_id: int, bracket: str) -> discord.File | None:
+    from graphics import render_schedule_image
+    sections = await build_bracket_schedule_matches(tournament_id, bracket)
+    if not sections:
+        return None
+    label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+    buf = await render_schedule_image(label, sections)
+    return discord.File(buf, filename="bracket.png")
 
 
 async def create_group_panel_channel(guild: discord.Guild, category: discord.CategoryChannel, group: dict) -> discord.TextChannel:
@@ -1669,7 +1717,8 @@ async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int,
 
     panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], overwrites=overwrites)
     panel = await build_bracket_panel_view(tournament_id, bracket)
-    msg = await panel_channel.send(view=panel)
+    schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
+    msg = await panel_channel.send(view=panel, files=[schedule_file] if schedule_file else [])
     await pool.execute(
         "UPDATE tournament_bracket_meta SET panel_channel_id = $1, panel_message_id = $2 WHERE tournament_id = $3 AND bracket = $4",
         panel_channel.id, msg.id, tournament_id, bracket,
@@ -1695,7 +1744,8 @@ async def refresh_bracket_panel(bot: commands.Bot, tournament_id: int, bracket: 
     except discord.HTTPException:
         return
     panel = await build_bracket_panel_view(tournament_id, bracket)
-    await msg.edit(view=panel)
+    schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
+    await msg.edit(view=panel, attachments=[schedule_file] if schedule_file else [])
 
 
 async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int]) -> list[dict]:

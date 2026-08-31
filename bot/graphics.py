@@ -163,27 +163,132 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     return buf
 
 
-async def render_group_schedule_image(group_label: str, matchdays: list[list[dict]]) -> io.BytesIO:
+PODIUM_COLORS = {1: (255, 215, 80), 2: (200, 205, 212), 3: (200, 140, 80)}
+PODIUM_HEIGHTS = {1: 190, 2: 140, 3: 100}
+PODIUM_ORDER = [2, 1, 3]  # Anzeige-Reihenfolge links -> rechts
+
+
+async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple[str, str | None]]) -> io.BytesIO:
+    """
+    Siegertreppchen-Grafik. places: {1: (team_name, logo_url), 2: (...), 3: (...)} - 2/3 optional.
+    """
+    width, height = 900, 480
+    img = Image.new("RGB", (width, height), DARK_BG)
+    draw = ImageDraw.Draw(img)
+    draw.text((36, 26), title, font=_font(32), fill=GOLD)
+    draw.text((36, 68), subtitle, font=_font(18), fill=GREY)
+
+    base_y = height - 50
+    slot_w = 220
+    gap = 30
+    total_w = slot_w * 3 + gap * 2
+    start_x = (width - total_w) // 2
+    logo_size = 84
+
+    async with aiohttp.ClientSession() as session:
+        for i, place in enumerate(PODIUM_ORDER):
+            if place not in places:
+                continue
+            team_name, logo_url = places[place]
+            x = start_x + i * (slot_w + gap)
+            step_h = PODIUM_HEIGHTS[place]
+            step_top = base_y - step_h
+            color = PODIUM_COLORS[place]
+
+            logo = await _fetch_logo(session, logo_url, team_name)
+            logo_cx = x + slot_w // 2
+            logo_top = step_top - logo_size - 20
+            if logo:
+                _paste_logo(img, logo, (logo_cx - logo_size // 2, logo_top, logo_cx + logo_size // 2, logo_top + logo_size))
+            else:
+                draw.ellipse(
+                    [(logo_cx - logo_size // 2, logo_top), (logo_cx + logo_size // 2, logo_top + logo_size)],
+                    fill=CARD_BG, outline=color, width=3,
+                )
+
+            name_font = _font(20)
+            name = team_name[:20]
+            nw, _ = _text_size(draw, name, name_font)
+            draw.text((logo_cx - nw / 2, logo_top - 32), name, font=name_font, fill=WHITE)
+
+            draw.rounded_rectangle([(x, step_top), (x + slot_w, base_y)], radius=10, fill=color)
+            place_font = _font(46)
+            place_text = str(place)
+            pw, ph = _text_size(draw, place_text, place_font)
+            draw.text((logo_cx - pw / 2, step_top + step_h / 2 - ph / 2 - 6), place_text, font=place_font, fill=DARK_BG)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_club_stats_card(
+    team_name: str, ea_club_name: str | None, logo_url: str | None,
+    division_text: str | None, medals: list[str], record_text: str | None, goals_text: str | None,
+) -> io.BytesIO:
+    """Kompakte Stat-Karte fuer /club_stats - Kopfbereich (Identitaet + Titel + Bilanz), Details bleiben Text darunter."""
+    width, height = 900, 300
+    img = Image.new("RGB", (width, height), DARK_BG)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=(70, 60, 30), width=2)
+
+    logo_size = 110
+    async with aiohttp.ClientSession() as session:
+        logo = await _fetch_logo(session, logo_url, team_name)
+    if logo:
+        _paste_logo(img, logo, (36, 36, 36 + logo_size, 36 + logo_size))
+    else:
+        draw.ellipse([(36, 36), (36 + logo_size, 36 + logo_size)], fill=CARD_BG, outline=GOLD, width=2)
+
+    text_x = 36 + logo_size + 28
+    draw.text((text_x, 34), team_name, font=_font(34), fill=WHITE)
+    if ea_club_name:
+        draw.text((text_x, 78), f"EA-Club: {ea_club_name}", font=_font(18), fill=GREY)
+    if division_text:
+        draw.text((text_x, 108), division_text, font=_font(18), fill=GOLD)
+
+    y = 36 + logo_size + 24
+    draw.line([(36, y), (width - 36, y)], fill=(60, 52, 28), width=1)
+    y += 24
+
+    if medals:
+        draw.text((36, y), "  ".join(medals), font=_font(26), fill=GOLD)
+        y += 44
+    if record_text:
+        draw.text((36, y), record_text, font=_font(22), fill=WHITE)
+        y += 34
+    if goals_text:
+        draw.text((36, y), goals_text, font=_font(20), fill=GREY)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]]]) -> io.BytesIO:
     """
     Programmatischer Spielplan im Awards/Top11-Stil (dunkel/gold), kein Template noetig -
-    passt sich automatisch an Anzahl Spieltage/Spiele an. Ergebnisse werden direkt mit
-    angezeigt (Aufruf bei jeder Ergebnis-Aenderung, siehe refresh_group_panel).
-    Match-Dict: team1_name, team2_name, team1_logo_url, team2_logo_url, team1_score,
-    team2_score, status.
+    passt sich automatisch an die Anzahl Abschnitte/Spiele an. Ergebnisse werden direkt mit
+    angezeigt. Dient sowohl fuer Gruppen-Spieltage als auch KO-Bracket-Runden.
+    sections: Liste von (Abschnitts-Label, Matches), z.B. ("Spieltag 1", [...]) oder
+    ("Halbfinale", [...]). Match-Dict: team1_name, team2_name, team1_logo_url,
+    team2_logo_url, team1_score, team2_score, status.
     """
     width = 1000
     header_h = 90
-    matchday_header_h = 46
+    section_header_h = 46
     row_h = 78
     padding_bottom = 20
 
-    matchdays_with_games = [md for md in matchdays if md]
-    total_rows = sum(len(md) for md in matchdays_with_games)
-    height = header_h + len(matchdays_with_games) * matchday_header_h + total_rows * row_h + padding_bottom
+    sections_with_games = [s for s in sections if s[1]]
+    total_rows = sum(len(matches) for _, matches in sections_with_games)
+    height = header_h + len(sections_with_games) * section_header_h + total_rows * row_h + padding_bottom
 
     img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
     draw = ImageDraw.Draw(img)
-    draw.text((36, 26), f"📋 Spielplan — {group_label}", font=_font(30), fill=GOLD)
+    draw.text((36, 26), f"📋 {title}", font=_font(30), fill=GOLD)
     draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
 
     y = header_h
@@ -192,11 +297,11 @@ async def render_group_schedule_image(group_label: str, matchdays: list[list[dic
     score_font = _font(23)
 
     async with aiohttp.ClientSession() as session:
-        for md_idx, matches in enumerate(matchdays, start=1):
+        for section_label, matches in sections:
             if not matches:
                 continue
-            draw.text((36, y + 10), f"Spieltag {md_idx}", font=_font(18), fill=GREY)
-            y += matchday_header_h
+            draw.text((36, y + 10), section_label, font=_font(18), fill=GREY)
+            y += section_header_h
             for m in matches:
                 row_bottom = y + row_h - 12
                 draw.rounded_rectangle([(26, y), (width - 26, row_bottom)], radius=12, fill=CARD_BG)

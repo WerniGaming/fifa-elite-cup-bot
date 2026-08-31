@@ -797,6 +797,28 @@ class TeamManagerCog(commands.Cog):
         league_points = seasonal.get("leaguePoints") or seasonal.get("skillRating")
         cup_has_data = cup_stats and (cup_stats["wins"] or cup_stats["draws"] or cup_stats["losses"])
 
+        stats_card_file = None
+        if division or cup_has_data:
+            from graphics import render_club_stats_card
+            division_text = f"Division {division}" + (f" · {league_points} Punkte" if league_points else "") if division else None
+            medals = []
+            if cup_has_data:
+                if cup_stats["cup_titles"]:
+                    medals.append(f"🥇×{cup_stats['cup_titles']}")
+                if cup_stats["loser_bracket_titles"]:
+                    medals.append(f"🥈×{cup_stats['loser_bracket_titles']}")
+                if cup_stats["third_places"]:
+                    medals.append(f"🥉×{cup_stats['third_places']}")
+            record_text = f"{cup_stats['wins']}S {cup_stats['draws']}U {cup_stats['losses']}N" if cup_has_data else None
+            goals_text = None
+            if cup_has_data:
+                gd = cup_stats["goals_for"] - cup_stats["goals_against"]
+                goals_text = f"Tore {cup_stats['goals_for']}:{cup_stats['goals_against']} (Diff {gd:+d})"
+            buf = await render_club_stats_card(
+                row["name"], row["ea_club_name"], row.get("logo_url"), division_text, medals, record_text, goals_text
+            )
+            stats_card_file = discord.File(buf, filename="stats_card.png")
+
         if division or league_points or cup_has_data:
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
             block = ["### 🏆 Titel & Liga"]
@@ -879,7 +901,10 @@ class TeamManagerCog(commands.Cog):
 
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
-        await interaction.followup.send(view=view)
+        if stats_card_file:
+            await interaction.followup.send(view=view, files=[stats_card_file])
+        else:
+            await interaction.followup.send(view=view)
 
     @club_stats.autocomplete("team")
     async def club_stats_autocomplete(self, interaction: discord.Interaction, current: str):
