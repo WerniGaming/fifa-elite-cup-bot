@@ -10,7 +10,7 @@ Jede Guild bekommt beim Bot-Start dasselbe persistente View wieder registriert
 from __future__ import annotations
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import io
 import logging
@@ -79,6 +79,38 @@ async def reset_team_nickname(member: discord.Member):
         log.warning(f"Konnte Nickname von {member} nicht zuruecksetzen (fehlende Berechtigung).")
     except discord.HTTPException:
         log.exception(f"Fehler beim Zuruecksetzen des Nicknames fuer {member}")
+
+
+async def refresh_all_team_logo_urls(bot: commands.Bot):
+    """
+    Discord-CDN-Attachment-URLs sind nur ca. 24h gueltig (signierte ex=/is=/hm=-Parameter),
+    auch wenn die Nachricht dauerhaft im Speicherkanal liegt - nur ein erneutes Abrufen der
+    Nachricht liefert eine frische URL. Laeuft periodisch als Hintergrund-Task
+    (siehe TeamManagerCog._refresh_logos_task) und einmalig direkt beim Bot-Start.
+    """
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, logo_channel_id, logo_message_id FROM teams WHERE logo_channel_id IS NOT NULL AND logo_message_id IS NOT NULL"
+    )
+    refreshed, failed = 0, 0
+    for row in rows:
+        channel = bot.get_channel(row["logo_channel_id"])
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(row["logo_channel_id"])
+            except discord.HTTPException:
+                failed += 1
+                continue
+        try:
+            msg = await channel.fetch_message(row["logo_message_id"])
+            fresh_url = msg.attachments[0].url
+        except (discord.HTTPException, IndexError):
+            failed += 1
+            continue
+        await pool.execute("UPDATE teams SET logo_url = $1 WHERE id = $2", fresh_url, row["id"])
+        refreshed += 1
+    if refreshed or failed:
+        log.info(f"Team-Logo-URLs aufgefrischt: {refreshed} ok, {failed} fehlgeschlagen.")
 
 
 async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
@@ -528,7 +560,10 @@ class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
             await interaction.followup.send(view=error_embed("Logo konnte nicht gespeichert werden.", "Bitte erneut versuchen."), ephemeral=True)
             return
 
-        await pool.execute("UPDATE teams SET logo_url = $1 WHERE id = $2", permanent_url, self.team_id)
+        await pool.execute(
+            "UPDATE teams SET logo_url = $1, logo_channel_id = $2, logo_message_id = $3 WHERE id = $4",
+            permanent_url, storage_channel.id, permanent_msg.id, self.team_id,
+        )
         await interaction.followup.send(view=success_embed("Logo aktualisiert!"), ephemeral=True)
 
 
@@ -713,6 +748,21 @@ class TeamManagerCog(commands.Cog):
 
     async def cog_load(self):
         self.bot.add_view(TeamManagerPanel())
+        self._refresh_logos_task.start()
+
+    def cog_unload(self):
+        self._refresh_logos_task.cancel()
+
+    @tasks.loop(hours=6)
+    async def _refresh_logos_task(self):
+        try:
+            await refresh_all_team_logo_urls(self.bot)
+        except Exception:
+            log.exception("Fehler beim periodischen Auffrischen der Team-Logo-URLs")
+
+    @_refresh_logos_task.before_loop
+    async def _before_refresh_logos(self):
+        await self.bot.wait_until_ready()
 
     @app_commands.command(name="team_manager_setup", description="Postet das Team-Manager-Panel in diesem Kanal (Admin)")
     @app_commands.checks.has_permissions(administrator=True)
