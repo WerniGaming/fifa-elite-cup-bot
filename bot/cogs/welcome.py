@@ -8,41 +8,56 @@ from discord import app_commands
 from discord.ext import commands
 
 from permissions import is_tournament_admin
-from ui_helpers import error_embed
+from ui_helpers import error_embed, success_embed
 
 
 class WelcomePanel(discord.ui.LayoutView):
     def __init__(self, team_manager_channel_id: int | None = None):
         super().__init__(timeout=None)
         team_manager_mention = f"<#{team_manager_channel_id}>" if team_manager_channel_id else "#team-manager"
-        text = (
-            "# 👋 WILLKOMMEN\n"
-            "### Willkommen beim FIFA Elite Cup!\n"
-            "Schön, dass du hier bist. Schau dich um, verfolge laufende Turniere live und werde Teil "
-            "der Community.\n"
-            "-----\n"
-            "### » Team-Management\n"
-            f"Willst du aktiv an Turnieren teilnehmen? Im Kanal {team_manager_mention} kannst du:\n"
-            "› dein Team erstellen und verwalten\n"
-            "› ein Logo hochladen und deinen Stream-Link hinterlegen\n"
-            "› dich mit deinem Team für laufende Turniere anmelden\n"
-            "-----\n"
-            "### » Für Team-Manager\n"
-            "› Du bist der offizielle Ansprechpartner für dein Team\n"
-            "› Ergebnisse werden ausschließlich über den Bot gemeldet\n"
-            "› Du kannst bis zu 2 Co-Manager ernennen, die ebenfalls Ergebnisse eintragen und "
-            "dein Team anmelden dürfen\n"
-            "-----\n"
-            "### » Team-Statistiken\n"
-            "› Jedes Team hat eine eigene Statistik-Übersicht (`/club_stats`)\n"
-            "› Turniersiege, Bilanz und Torverhältnis werden dauerhaft gespeichert\n"
-            "-----\n"
-            "### » Wichtig\n"
-            "› Respekt und Fairplay sind Pflicht\n"
-            "› Entscheidungen der Turnierleitung sind verbindlich\n"
+
+        intro = discord.ui.TextDisplay(
+            "# ⚽ Willkommen im FIFA Elite Cup\n"
+            "Gut, dass du da bist! Hier findest du alles rund um unsere Turniere — Anmeldung, "
+            "Ergebnisse, Live-Spielpläne und die ganze Community."
+        )
+        team_block = discord.ui.TextDisplay(
+            "### 🧢 Dein Team\n"
+            f"Alles zu deinem Verein läuft über {team_manager_mention}:\n"
+            "› Team gründen und Stammdaten pflegen\n"
+            "› Logo und Stream-Link hinterlegen\n"
+            "› mit dem Team an einem offenen Turnier anmelden"
+        )
+        manager_block = discord.ui.TextDisplay(
+            "### 👤 Vereinsmanager\n"
+            "› du vertrittst dein Team nach außen\n"
+            "› Ergebnisse laufen ausschließlich über den Bot, nie manuell\n"
+            "› bis zu 2 Co-Manager möglich — die dürfen genauso Ergebnisse eintragen und das Team anmelden"
+        )
+        stats_block = discord.ui.TextDisplay(
+            "### 📊 Statistik\n"
+            "› `/club_stats` zeigt die aktuelle Form eines Teams\n"
+            "› Titel, Bilanz und Tordifferenz bleiben dauerhaft gespeichert"
+        )
+        rules_block = discord.ui.TextDisplay(
+            "### ⚠️ Bevor es losgeht\n"
+            "› fairer Umgang miteinander ist Grundvoraussetzung\n"
+            "› Entscheidungen der Turnierleitung sind final\n"
             "-# FIFA Elite Cup"
         )
-        container = discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold())
+
+        container = discord.ui.Container(
+            intro,
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+            team_block,
+            discord.ui.Separator(),
+            manager_block,
+            discord.ui.Separator(),
+            stats_block,
+            discord.ui.Separator(),
+            rules_block,
+            accent_color=discord.Color.gold(),
+        )
         self.add_item(container)
 
 
@@ -57,7 +72,8 @@ class WelcomeCog(commands.Cog):
             await interaction.response.send_message(view=error_embed("Nur Admins können die Willkommens-Nachricht posten."), ephemeral=True)
             return
         channel_id = team_manager_channel.id if team_manager_channel else None
-        await interaction.response.send_message(view=WelcomePanel(channel_id))
+        await interaction.response.send_message(view=success_embed("Willkommens-Nachricht wird gepostet..."), ephemeral=True)
+        await interaction.channel.send(view=WelcomePanel(channel_id))
 
 
 async def setup(bot: commands.Bot):

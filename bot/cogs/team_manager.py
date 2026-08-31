@@ -130,6 +130,122 @@ async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
         log.exception(f"Fehler beim Erstellen der Stream-Uebersicht in Guild {guild.id}")
 
 
+TEAMS_PER_OVERVIEW_MESSAGE = 8  # Components-V2-Nachrichten haben ein Zeichenlimit, bei vielen Teams auf mehrere Nachrichten verteilen
+
+
+async def get_team_tournament_history(pool, team_id: int) -> list[str]:
+    """Kompakte Turnierhistorie eines Teams: Platzierung soweit bekannt, sonst 'teilgenommen'."""
+    rows = await pool.fetch(
+        """
+        SELECT t.name, t.status, t.winner_champion_id, t.loser_champion_id,
+               t.winner_bracket_third_id, t.loser_bracket_third_id
+        FROM tournament_signups ts
+        JOIN tournaments t ON t.id = ts.tournament_id
+        WHERE ts.team_id = $1 AND ts.status IN ('registered', 'waitlist')
+        ORDER BY t.created_at DESC
+        LIMIT 10
+        """,
+        team_id,
+    )
+    lines = []
+    for r in rows:
+        if r["winner_champion_id"] == team_id:
+            placement = "🥇 Sieger Winner-Bracket"
+        elif r["loser_champion_id"] == team_id:
+            placement = "🥇 Sieger Loser-Bracket"
+        elif r["winner_bracket_third_id"] == team_id or r["loser_bracket_third_id"] == team_id:
+            placement = "🥉 Platz 3"
+        elif r["status"] == "finished":
+            placement = "Teilgenommen"
+        else:
+            placement = "Läuft noch"
+        lines.append(f"› {r['name']} — {placement}")
+    return lines
+
+
+async def refresh_team_overview(bot: commands.Bot, guild: discord.Guild):
+    """Baut die Vereins-Uebersicht komplett neu auf und postet sie frisch (statt zu editieren, da sich
+    die Anzahl benoetigter Nachrichten je nach Teamzahl aendert)."""
+    pool = get_pool()
+    settings = await pool.fetchrow("SELECT * FROM team_overview_panel WHERE guild_id = $1", guild.id)
+    if not settings:
+        return
+
+    channel = guild.get_channel(settings["channel_id"])
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(settings["channel_id"])
+        except discord.HTTPException:
+            return
+
+    for old_id in settings["message_ids"] or []:
+        try:
+            old_msg = await channel.fetch_message(old_id)
+            await old_msg.delete()
+        except discord.HTTPException:
+            pass
+
+    teams = await pool.fetch("SELECT * FROM teams WHERE guild_id = $1 ORDER BY name", guild.id)
+    now_ts = int(discord.utils.utcnow().timestamp())
+
+    if not teams:
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(f"# 📋 Vereins-Übersicht\n_Noch keine Teams registriert._\n\n-# Stand: <t:{now_ts}:R>"),
+            accent_color=discord.Color.gold(),
+        ))
+        try:
+            msg = await channel.send(view=view)
+            await pool.execute(
+                "UPDATE team_overview_panel SET message_ids = $1 WHERE guild_id = $2", [msg.id], guild.id
+            )
+        except discord.HTTPException:
+            log.exception(f"Fehler beim Erstellen der leeren Vereins-Uebersicht in Guild {guild.id}")
+        return
+
+    chunks = [teams[i:i + TEAMS_PER_OVERVIEW_MESSAGE] for i in range(0, len(teams), TEAMS_PER_OVERVIEW_MESSAGE)]
+    new_message_ids = []
+    for idx, chunk in enumerate(chunks):
+        blocks = []
+        if idx == 0:
+            blocks.append(discord.ui.TextDisplay(f"# 📋 Vereins-Übersicht\n{len(teams)} registrierte Teams"))
+            blocks.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+        for i, team in enumerate(chunk):
+            managers = await get_team_managers(team["id"])
+            owner_id = next((m["discord_id"] for m in managers if m["role"] == "owner"), None)
+            comanager_ids = [m["discord_id"] for m in managers if m["role"] != "owner"]
+            history = await get_team_tournament_history(pool, team["id"])
+
+            lines = [
+                f"### {team['name']}",
+                f"**EA-Club:** {team.get('ea_club_name') or '-'}",
+                f"**Stream:** {team.get('stream_link') or '_keiner hinterlegt_'}",
+                f"**Vereinsmanager:** {f'<@{owner_id}>' if owner_id else '_unbekannt_'}",
+                f"**Co-Manager:** {', '.join(f'<@{cid}>' for cid in comanager_ids) if comanager_ids else '-'}",
+            ]
+            if history:
+                lines.append("**Turniere:**")
+                lines += history
+            blocks.append(discord.ui.TextDisplay("\n".join(lines)))
+            if i < len(chunk) - 1:
+                blocks.append(discord.ui.Separator())
+        if idx == len(chunks) - 1:
+            blocks.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+            blocks.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R>"))
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(*blocks, accent_color=discord.Color.gold()))
+        try:
+            msg = await channel.send(view=view)
+            new_message_ids.append(msg.id)
+        except discord.HTTPException:
+            log.exception(f"Fehler beim Posten der Vereins-Uebersicht (Chunk {idx}) in Guild {guild.id}")
+
+    await pool.execute(
+        "UPDATE team_overview_panel SET message_ids = $1 WHERE guild_id = $2", new_message_ids, guild.id
+    )
+
+
 BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "banner.jpg")
 
 
@@ -281,6 +397,7 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
         await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=True)
         if self.stream_link.value:
             await refresh_stream_list(interaction.client, interaction.guild)
+        await refresh_team_overview(interaction.client, interaction.guild)
 
         await interaction.followup.send(
             f"✅ Team **{ea_club_name}** erstellt und verknüpft! "
@@ -312,6 +429,7 @@ class EditFieldModal(discord.ui.Modal):
         await interaction.response.send_message(view=success_embed("Aktualisiert."), ephemeral=True)
         if self.field == "stream_link":
             await refresh_stream_list(interaction.client, interaction.guild)
+            await refresh_team_overview(interaction.client, interaction.guild)
 
 
 # ---------- Ephemere Untermenüs ----------
@@ -468,6 +586,7 @@ class CoManagerView(discord.ui.View):
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=True)
             from cogs.tournament_manager import grant_live_tournament_access
             await grant_live_tournament_access(interaction.guild, self.team["id"], member)
+        await refresh_team_overview(interaction.client, interaction.guild)
         await interaction.response.send_message(view=success_embed(f"{user.mention} ist jetzt Co-Manager von {self.team['name']}"), ephemeral=True)
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Co-Manager entfernen")
@@ -483,6 +602,7 @@ class CoManagerView(discord.ui.View):
         if member:
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=False)
             await reset_team_nickname(member)
+        await refresh_team_overview(interaction.client, interaction.guild)
         await interaction.response.send_message(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
 
 
@@ -510,6 +630,7 @@ class LeaveConfirmView(discord.ui.View):
             await interaction.response.edit_message(content=f"🗑️ Team **{self.team['name']}** wurde gelöscht.", view=None)
             if self.team.get("stream_link"):
                 await refresh_stream_list(interaction.client, interaction.guild)
+            await refresh_team_overview(interaction.client, interaction.guild)
         else:
             await pool.execute(
                 "DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2",
@@ -517,6 +638,7 @@ class LeaveConfirmView(discord.ui.View):
             )
             await _toggle_configured_role(interaction.guild, interaction.user, "co_manager_role_id", grant=False)
             await reset_team_nickname(interaction.user)
+            await refresh_team_overview(interaction.client, interaction.guild)
             await interaction.response.edit_message(content=f"👋 Du hast **{self.team['name']}** verlassen.", view=None)
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
@@ -530,49 +652,41 @@ class TeamManagerPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
         self.banner_file = discord.File(BANNER_PATH, filename="banner.jpg")
-        text = (
-            "# TEAM MANAGER\n"
-            "Verwalte dein Team für den FIFA Elite Cup.\n"
-            "\n"
-            "-----\n"
-            "\n"
-            "**» TEAM VERKNÜPFEN**\n"
-            "- Verbinde deinen EA FC Pro Club mit deinem Discord-Account\n"
-            "- Der Club-Name wird automatisch aus der EA API übernommen\n"
-            "- Optional: Twitch/YouTube Stream-Link hinterlegen\n"
-            "\n"
-            "-----\n"
-            "\n"
-            "**» FUNKTIONEN**\n"
-            "\n"
-            "**Stream-Link**\n"
-            "- Ändere deinen hinterlegten Stream jederzeit\n"
-            "\n"
-            "**Logo**\n"
-            "- Lade ein Team-Logo hoch (PNG, JPG, WEBP)\n"
-            "\n"
-            "**Co-Manager**\n"
-            "- Füge Co-Manager hinzu, sie können Spiele für dein Team eintragen\n"
-            "\n"
-            "**Team-Info**\n"
-            "- Zeigt Statistiken und Mitglieder\n"
-            "\n"
-            "-----\n"
-            "\n"
-            "**» WICHTIG**\n"
-            "\n"
-            "Bist du Spieler eines Teams? Dann musst du hier nichts tun!\n"
-            "\n"
-            "Dieser Bereich ist nur für Vereinsmanager, die ein Team für Turniere anmelden möchten.\n"
-            "\n"
-            "Wichtig: Der EA FC Pro Club Name muss exakt stimmen!\n"
-            "FIFA Elite Cup"
+        intro = discord.ui.TextDisplay(
+            "# 🧢 Team Manager\n"
+            "Zentrale Anlaufstelle für alles rund um deinen Verein im FIFA Elite Cup."
+        )
+        link_block = discord.ui.TextDisplay(
+            "### 🔗 Team verknüpfen\n"
+            "› koppelt deinen EA FC Pro Club mit deinem Discord-Account\n"
+            "› der Club-Name wird direkt von der EA API übernommen\n"
+            "› optional: Twitch- oder YouTube-Link direkt mit anlegen"
+        )
+        features_block = discord.ui.TextDisplay(
+            "### ⚙️ Was du hier sonst noch einstellen kannst\n"
+            "**Stream-Link** — jederzeit änderbar\n"
+            "**Logo** — PNG, JPG oder WEBP hochladen\n"
+            "**Co-Manager** — dürfen ebenfalls Ergebnisse für dein Team eintragen\n"
+            "**Mein Team** — zeigt Kader, Statistiken und aktuelle Einstellungen"
+        )
+        note_block = discord.ui.TextDisplay(
+            "### ℹ️ Hinweis\n"
+            "Spielst du nur mit, ohne selbst Team-Verantwortung zu haben? Dann brauchst du hier "
+            "nichts zu tun — dieser Bereich ist ausschließlich für Vereinsmanager.\n"
+            "Achte beim Verknüpfen darauf, dass der EA FC Pro Club Name exakt übereinstimmt.\n"
+            "-# FIFA Elite Cup"
         )
         container = discord.ui.Container(
             discord.ui.MediaGallery(
                 discord.MediaGalleryItem(media=self.banner_file),
             ),
-            discord.ui.TextDisplay(text),
+            intro,
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+            link_block,
+            discord.ui.Separator(),
+            features_block,
+            discord.ui.Separator(),
+            note_block,
             discord.ui.ActionRow(
                 discord.ui.Button(label="Team verknüpfen", style=discord.ButtonStyle.primary, custom_id="team:create"),
                 discord.ui.Button(label="Mein Team", style=discord.ButtonStyle.secondary, custom_id="team:info"),
@@ -604,7 +718,20 @@ class TeamManagerCog(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def team_manager_setup(self, interaction: discord.Interaction):
         panel = TeamManagerPanel()
-        await interaction.response.send_message(view=panel, files=[panel.banner_file])
+        await interaction.response.send_message(view=success_embed("Team-Manager-Panel wird gepostet..."), ephemeral=True)
+        await interaction.channel.send(view=panel, files=[panel.banner_file])
+
+    @app_commands.command(name="team_overview_setup", description="Legt diesen Kanal als Live-Vereins-Übersicht fest (Admin)")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def team_overview_setup(self, interaction: discord.Interaction):
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO team_overview_panel (guild_id, channel_id, message_ids) VALUES ($1, $2, '{}') "
+            "ON CONFLICT (guild_id) DO UPDATE SET channel_id = $2, message_ids = '{}'",
+            interaction.guild_id, interaction.channel_id,
+        )
+        await interaction.response.send_message(view=success_embed("Vereins-Übersicht wird eingerichtet..."), ephemeral=True)
+        await refresh_team_overview(interaction.client, interaction.guild)
 
     @app_commands.command(name="club_stats", description="Zeigt EA-Club-Statistiken eines Teams: letzte Friendlys, Liga, Kader")
     @app_commands.describe(team="Name des Teams (auf diesem Server)")

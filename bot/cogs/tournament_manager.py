@@ -2157,10 +2157,9 @@ class TournamentPanel(discord.ui.LayoutView):
 
         # Block 3: Erklaerungstext (nach den Buttons)
         explanation = (
-            "-# Die Turniergröße passt sich automatisch an die Teilnehmerzahl an. Meldet euch an — je mehr "
-            "Teams, desto größer wird das Turnier! Teams, die nicht mehr in die aktuelle Stufe passen, stehen "
-            "auf der Warteliste und rücken automatisch nach, sobald genug Anmeldungen für die nächste Stufe "
-            "eingehen."
+            "-# Die Turniergröße wächst automatisch mit den Anmeldungen — jede weitere Anmeldung kann also "
+            "das Turnier vergrößern. Passt ein Team nicht mehr in die aktuelle Stufe, landet es auf der "
+            "Warteliste und rutscht nach, sobald genug Anmeldungen für die nächstgrößere Stufe da sind."
         )
 
         closed = t["status"] != "open"

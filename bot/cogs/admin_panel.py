@@ -1204,26 +1204,20 @@ class DMBroadcastModal(discord.ui.Modal, title="DM an alle Vereinsmanager"):
 class AdminPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
-        text = (
-            "# ADMIN PANEL\n"
-            "Zentrale Turnierverwaltung für den FIFA Elite Cup.\n"
-            "\n"
-            "-----\n"
-            "\n"
-            "**» TURNIERE**\n"
-            "- Turnier erstellen, verwalten, alle registrierten Teams einsehen\n"
-            "\n"
-            "**» MODERATION**\n"
-            "- Spieler/Teams sperren, Ticket-System\n"
-            "\n"
-            "**» KOMMUNIKATION**\n"
-            "- Eigene Nachrichten posten, DM an alle Vereinsmanager\n"
-            "\n"
-            "**» SYSTEM**\n"
-            "- Stats-Kanäle, Rollen (Admin/Moderator/VM/Co-Manager), Nicknames, Stream-Liste"
+        intro = discord.ui.TextDisplay(
+            "# 🛠️ Admin Panel\n"
+            "Steuerzentrale für den FIFA Elite Cup — wähle unten eine Kategorie."
+        )
+        categories = discord.ui.TextDisplay(
+            "**🏆 Turniere** — anlegen, verwalten, komplette Team-Liste einsehen\n"
+            "**🔨 Moderation** — Spieler/Teams sperren, Ticket-System konfigurieren\n"
+            "**📣 Kommunikation** — eigene Ankündigungen posten, DM an alle Vereinsmanager\n"
+            "**⚙️ System** — Stats-Kanäle, Rollen (Admin/Moderator/VM/Co-Manager), Nicknames, Stream-Liste"
         )
         container = discord.ui.Container(
-            discord.ui.TextDisplay(text),
+            intro,
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+            categories,
             discord.ui.ActionRow(
                 discord.ui.Button(label="Turniere", style=discord.ButtonStyle.primary, custom_id="admincat:tournaments"),
                 discord.ui.Button(label="Moderation", style=discord.ButtonStyle.danger, custom_id="admincat:moderation"),
@@ -1247,7 +1241,8 @@ class AdminPanelCog(commands.Cog):
         if not await is_tournament_admin(interaction.user):
             await interaction.response.send_message(view=error_embed("Nur Admins können das Admin-Panel posten."), ephemeral=True)
             return
-        await interaction.response.send_message(view=AdminPanel())
+        await interaction.response.send_message(view=success_embed("Admin-Panel wird gepostet..."), ephemeral=True)
+        await interaction.channel.send(view=AdminPanel())
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):

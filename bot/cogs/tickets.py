@@ -35,22 +35,24 @@ CATEGORY_LABELS = {key: label for key, label, _ in TICKET_CATEGORIES}
 class TicketPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
-        text = (
-            "# 🎫 SUPPORT\n"
-            "Brauchst du Hilfe oder hast eine Frage? Öffne ein Ticket und unser Team kümmert sich "
-            "schnellstmöglich um dein Anliegen.\n"
-            "-----\n"
-            "### » So funktioniert's\n"
-            "› Kategorie unten auswählen\n"
-            "› Anliegen kurz beschreiben\n"
-            "› Optional: Screenshot dazu hochladen\n"
-            "› Ein privater Kanal wird für dich erstellt, unser Team meldet sich dort\n"
-            "-----\n"
-            "### » Wichtig\n"
-            "› Bitte nur **ein Ticket pro Anliegen** öffnen\n"
-            "› Je genauer die Beschreibung, desto schneller können wir helfen\n"
-            "› Bleib bitte respektvoll - wir helfen dir gerne!\n"
-            "-# FIFA Elite Cup - Support"
+        intro = discord.ui.TextDisplay(
+            "# 🎫 Support-Ticket\n"
+            "Fragen, Probleme oder ein Anliegen, das persönlich geklärt werden muss? Ein Ticket bringt "
+            "dich direkt mit unserem Team in Kontakt."
+        )
+        howto_block = discord.ui.TextDisplay(
+            "### 📝 Ablauf\n"
+            "› Kategorie im Menü unten wählen\n"
+            "› kurz schildern, worum es geht\n"
+            "› optional einen Screenshot anhängen\n"
+            "› dein privater Kanal wird angelegt, das Team meldet sich dort"
+        )
+        rules_block = discord.ui.TextDisplay(
+            "### 📌 Bitte beachten\n"
+            "› pro Anliegen reicht **ein** Ticket\n"
+            "› eine genaue Beschreibung beschleunigt die Bearbeitung deutlich\n"
+            "› ein respektvoller Ton ist die Grundlage jeder Hilfe\n"
+            "-# FIFA Elite Cup — Support"
         )
         select = discord.ui.Select(
             placeholder="Kategorie auswählen, um ein Ticket zu öffnen...",
@@ -61,7 +63,11 @@ class TicketPanel(discord.ui.LayoutView):
             custom_id="ticket:open_select",
         )
         container = discord.ui.Container(
-            discord.ui.TextDisplay(text),
+            intro,
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+            howto_block,
+            discord.ui.Separator(),
+            rules_block,
             discord.ui.ActionRow(select),
             accent_color=discord.Color.gold(),
         )
@@ -398,7 +404,8 @@ class TicketsCog(commands.Cog):
         if not await is_tournament_admin(interaction.user):
             await interaction.response.send_message(view=error_embed("Nur Admins können das Ticket-Panel posten."), ephemeral=True)
             return
-        await interaction.response.send_message(view=TicketPanel())
+        await interaction.response.send_message(view=success_embed("Ticket-Panel wird gepostet..."), ephemeral=True)
+        await interaction.channel.send(view=TicketPanel())
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
