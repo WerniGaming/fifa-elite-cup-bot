@@ -33,6 +33,50 @@ def is_valid_twitch_link(value: str) -> bool:
     return bool(TWITCH_LINK_PATTERN.match(value.strip()))
 
 
+async def save_team_logo_attachment(guild: discord.Guild, team_id: int, attachment) -> tuple[bool, str]:
+    """
+    Speichert ein hochgeladenes Logo dauerhaft im Logo-Speicherkanal (siehe schema_phase30: die
+    Discord-CDN-URL selbst laeuft nach ca. 24h ab, deshalb wird zusaetzlich Kanal+Nachrichten-ID
+    gespeichert, damit refresh_all_team_logo_urls() die URL periodisch auffrischen kann).
+    Gibt (erfolg, meldung) zurueck.
+    """
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT logo_storage_channel_id FROM guild_settings WHERE guild_id = $1", guild.id)
+    storage_channel_id = row["logo_storage_channel_id"] if row else None
+    if not storage_channel_id:
+        return False, (
+            "⚠️ Es ist noch kein Logo-Speicherkanal eingerichtet (Admin muss das im Admin-Panel unter "
+            "'Stats-Kanäle einstellen' festlegen). Ohne diesen Kanal würde der Logo-Link nach kurzer Zeit "
+            "ablaufen, deshalb wurde nichts gespeichert."
+        )
+
+    storage_channel = guild.get_channel(storage_channel_id)
+    if storage_channel is None:
+        try:
+            storage_channel = await guild.fetch_channel(storage_channel_id)
+        except discord.HTTPException:
+            storage_channel = None
+    if storage_channel is None:
+        return False, "Logo-Speicherkanal nicht gefunden. Bitte Admin kontaktieren."
+
+    try:
+        file_bytes = await attachment.read()
+        permanent_msg = await storage_channel.send(
+            content=f"Logo für Team-ID {team_id}",
+            file=discord.File(io.BytesIO(file_bytes), filename=attachment.filename),
+        )
+        permanent_url = permanent_msg.attachments[0].url
+    except Exception:
+        log.exception(f"Fehler beim dauerhaften Speichern des Logos fuer Team {team_id}")
+        return False, "Logo konnte nicht gespeichert werden. Bitte erneut versuchen."
+
+    await pool.execute(
+        "UPDATE teams SET logo_url = $1, logo_channel_id = $2, logo_message_id = $3 WHERE id = $4",
+        permanent_url, storage_channel.id, permanent_msg.id, team_id,
+    )
+    return True, "Logo aktualisiert!"
+
+
 async def apply_team_nickname(member: discord.Member, team_name: str) -> bool:
     """Setzt den Server-Nickname auf 'Team | Username'. Gibt False zurueck, falls keine Berechtigung."""
     base_username = member.name
@@ -339,15 +383,30 @@ def team_info_text(team: dict, owner_id: int | None, comanager_ids: list[int], u
 
 class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
     """
-    Wie bei PadBot: nur EA-Club-Name + Stream-Link. Der Teamname wird
-    automatisch aus der EA-API uebernommen. Logo wird separat ueber
-    'Team bearbeiten' -> 'Logo hochladen' gesetzt (eigenes Popup).
-    Klassische Deklarationsform (wie EAClubModal, die bekannt funktioniert).
+    EA-Club-Name + Stream-Link + optionales Logo in einem Rutsch. Der Teamname
+    wird automatisch aus der EA-API uebernommen. Logo kann alternativ auch
+    spaeter ueber 'Team bearbeiten' -> 'Logo hochladen' gesetzt/geaendert werden.
     """
     ea_club_name = discord.ui.TextInput(label="EA FC 26 Pro Clubs Name", max_length=60)
     stream_link = discord.ui.TextInput(
         label="Twitch-Link (z.B. https://www.twitch.tv/name)", required=False, max_length=200
     )
+
+    def __init__(self):
+        super().__init__()
+        self.file_upload = discord.ui.FileUpload(
+            custom_id="team_logo_file",
+            min_values=0,
+            max_values=1,
+            required=False,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text="Team-Logo (optional)",
+                description="PNG, JPG oder WEBP - kannst du auch später über 'Logo hochladen' setzen.",
+                component=self.file_upload,
+            )
+        )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -429,11 +488,17 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
         await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=True)
         if self.stream_link.value:
             await refresh_stream_list(interaction.client, interaction.guild)
+
+        logo_values = getattr(self.file_upload, "values", None) or getattr(self.file_upload, "attachments", None) or []
+        logo_note = "Logo kannst du jederzeit über 'Team bearbeiten' -> 'Logo hochladen' ändern."
+        if logo_values:
+            success, message = await save_team_logo_attachment(interaction.guild, team_id, logo_values[0])
+            logo_note = message if success else f"⚠️ Logo-Upload fehlgeschlagen: {message}"
+
         await refresh_team_overview(interaction.client, interaction.guild)
 
         await interaction.followup.send(
-            f"✅ Team **{ea_club_name}** erstellt und verknüpft! "
-            "Logo kannst du jetzt über 'Team bearbeiten' -> 'Logo hochladen' setzen.",
+            f"✅ Team **{ea_club_name}** erstellt und verknüpft!\n{logo_note}",
             ephemeral=True,
         )
 
@@ -520,51 +585,13 @@ class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
         if not values:
             await interaction.response.send_message(view=error_embed("Kein Logo hochgeladen."), ephemeral=True)
             return
-        attachment = values[0]
 
         await interaction.response.defer(ephemeral=True, thinking=True)
-        pool = get_pool()
-
-        row = await pool.fetchrow(
-            "SELECT logo_storage_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id
-        )
-        storage_channel_id = row["logo_storage_channel_id"] if row else None
-        if not storage_channel_id:
-            await interaction.followup.send(
-                "⚠️ Es ist noch kein Logo-Speicherkanal eingerichtet (Admin muss das im Admin-Panel unter "
-                "'Stats-Kanäle einstellen' festlegen). Ohne diesen Kanal würde der Logo-Link nach kurzer Zeit "
-                "ablaufen, deshalb wurde nichts gespeichert.",
-                ephemeral=True,
-            )
-            return
-
-        storage_channel = interaction.guild.get_channel(storage_channel_id)
-        if storage_channel is None:
-            try:
-                storage_channel = await interaction.guild.fetch_channel(storage_channel_id)
-            except discord.HTTPException:
-                storage_channel = None
-        if storage_channel is None:
-            await interaction.followup.send(view=error_embed("Logo-Speicherkanal nicht gefunden.", "Bitte Admin kontaktieren."), ephemeral=True)
-            return
-
-        try:
-            file_bytes = await attachment.read()
-            permanent_msg = await storage_channel.send(
-                content=f"Logo für Team-ID {self.team_id}",
-                file=discord.File(io.BytesIO(file_bytes), filename=attachment.filename),
-            )
-            permanent_url = permanent_msg.attachments[0].url
-        except Exception:
-            log.exception(f"Fehler beim dauerhaften Speichern des Logos fuer Team {self.team_id}")
-            await interaction.followup.send(view=error_embed("Logo konnte nicht gespeichert werden.", "Bitte erneut versuchen."), ephemeral=True)
-            return
-
-        await pool.execute(
-            "UPDATE teams SET logo_url = $1, logo_channel_id = $2, logo_message_id = $3 WHERE id = $4",
-            permanent_url, storage_channel.id, permanent_msg.id, self.team_id,
-        )
-        await interaction.followup.send(view=success_embed("Logo aktualisiert!"), ephemeral=True)
+        success, message = await save_team_logo_attachment(interaction.guild, self.team_id, values[0])
+        if success:
+            await interaction.followup.send(view=success_embed(message), ephemeral=True)
+        else:
+            await interaction.followup.send(view=error_embed(message), ephemeral=True)
 
 
 class NotificationsView(discord.ui.View):
