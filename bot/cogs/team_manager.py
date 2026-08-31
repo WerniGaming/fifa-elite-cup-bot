@@ -159,7 +159,7 @@ async def get_team_tournament_history(pool, team_id: int) -> list[str]:
             placement = "Teilgenommen"
         else:
             placement = "Läuft noch"
-        lines.append(f"› {r['name']} — {placement}")
+        lines.append(f"> {r['name']} — {placement}")
     return lines
 
 
@@ -658,9 +658,9 @@ class TeamManagerPanel(discord.ui.LayoutView):
         )
         link_block = discord.ui.TextDisplay(
             "### 🔗 Team verknüpfen\n"
-            "› koppelt deinen EA FC Pro Club mit deinem Discord-Account\n"
-            "› der Club-Name wird direkt von der EA API übernommen\n"
-            "› optional: Twitch- oder YouTube-Link direkt mit anlegen"
+            "> koppelt deinen EA FC Pro Club mit deinem Discord-Account\n"
+            "> der Club-Name wird direkt von der EA API übernommen\n"
+            "> optional: Twitch- oder YouTube-Link direkt mit anlegen"
         )
         features_block = discord.ui.TextDisplay(
             "### ⚙️ Was du hier sonst noch einstellen kannst\n"

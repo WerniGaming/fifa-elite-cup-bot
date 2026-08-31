@@ -24,25 +24,25 @@ class WelcomePanel(discord.ui.LayoutView):
         team_block = discord.ui.TextDisplay(
             "### 🧢 Dein Team\n"
             f"Alles zu deinem Verein läuft über {team_manager_mention}:\n"
-            "› Team gründen und Stammdaten pflegen\n"
-            "› Logo und Stream-Link hinterlegen\n"
-            "› mit dem Team an einem offenen Turnier anmelden"
+            "> Team gründen und Stammdaten pflegen\n"
+            "> Logo und Stream-Link hinterlegen\n"
+            "> mit dem Team an einem offenen Turnier anmelden"
         )
         manager_block = discord.ui.TextDisplay(
             "### 👤 Vereinsmanager\n"
-            "› du vertrittst dein Team nach außen\n"
-            "› Ergebnisse laufen ausschließlich über den Bot, nie manuell\n"
-            "› bis zu 2 Co-Manager möglich — die dürfen genauso Ergebnisse eintragen und das Team anmelden"
+            "> du vertrittst dein Team nach außen\n"
+            "> Ergebnisse laufen ausschließlich über den Bot, nie manuell\n"
+            "> bis zu 2 Co-Manager möglich — die dürfen genauso Ergebnisse eintragen und das Team anmelden"
         )
         stats_block = discord.ui.TextDisplay(
             "### 📊 Statistik\n"
-            "› `/club_stats` zeigt die aktuelle Form eines Teams\n"
-            "› Titel, Bilanz und Tordifferenz bleiben dauerhaft gespeichert"
+            "> `/club_stats` zeigt die aktuelle Form eines Teams\n"
+            "> Titel, Bilanz und Tordifferenz bleiben dauerhaft gespeichert"
         )
         rules_block = discord.ui.TextDisplay(
             "### ⚠️ Bevor es losgeht\n"
-            "› fairer Umgang miteinander ist Grundvoraussetzung\n"
-            "› Entscheidungen der Turnierleitung sind final\n"
+            "> fairer Umgang miteinander ist Grundvoraussetzung\n"
+            "> Entscheidungen der Turnierleitung sind final\n"
             "-# FIFA Elite Cup"
         )
 

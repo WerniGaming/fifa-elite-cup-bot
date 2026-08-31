@@ -42,16 +42,16 @@ class TicketPanel(discord.ui.LayoutView):
         )
         howto_block = discord.ui.TextDisplay(
             "### 📝 Ablauf\n"
-            "› Kategorie im Menü unten wählen\n"
-            "› kurz schildern, worum es geht\n"
-            "› optional einen Screenshot anhängen\n"
-            "› dein privater Kanal wird angelegt, das Team meldet sich dort"
+            "> Kategorie im Menü unten wählen\n"
+            "> kurz schildern, worum es geht\n"
+            "> optional einen Screenshot anhängen\n"
+            "> dein privater Kanal wird angelegt, das Team meldet sich dort"
         )
         rules_block = discord.ui.TextDisplay(
             "### 📌 Bitte beachten\n"
-            "› pro Anliegen reicht **ein** Ticket\n"
-            "› eine genaue Beschreibung beschleunigt die Bearbeitung deutlich\n"
-            "› ein respektvoller Ton ist die Grundlage jeder Hilfe\n"
+            "> pro Anliegen reicht **ein** Ticket\n"
+            "> eine genaue Beschreibung beschleunigt die Bearbeitung deutlich\n"
+            "> ein respektvoller Ton ist die Grundlage jeder Hilfe\n"
             "-# FIFA Elite Cup — Support"
         )
         select = discord.ui.Select(
@@ -221,7 +221,7 @@ class TicketApplicationModal(discord.ui.Modal, title="Bewerbung - Fürs Team"):
     experience = discord.ui.TextInput(
         label="Hast du Erfahrung (z.B. Moderation/Support)?", style=discord.TextStyle.paragraph, required=False, max_length=500
     )
-    availability = discord.ui.TextInput(label="Wie viel Zeit kannst du wöchentlich einbringen?", required=True, max_length=100)
+    availability = discord.ui.TextInput(label="Zeit pro Woche verfügbar?", required=True, max_length=100)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
