@@ -566,11 +566,10 @@ async def try_fetch_ea_result(team1: dict, team2: dict) -> tuple[int, int] | Non
     return None
 
 
-async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracket: str) -> discord.File:
-    """Podium-Grafik fuer den Bracket-Abschluss: Erster/Zweiter/Dritter (soweit ermittelbar)."""
+async def get_bracket_podium_places(tournament_id: int, champion_id: int, bracket: str) -> dict[int, dict]:
+    """Ermittelt Erster/Zweiter/Dritter eines Brackets (soweit ermittelbar). Gibt {platz: team_row} zurueck."""
     pool = get_pool()
     t = await get_tournament(tournament_id)
-    bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
 
     final_match = await pool.fetchrow(
         """
@@ -606,15 +605,32 @@ async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracke
     ids = [i for i in (champion_id, runner_up_id, third_place_id) if i]
     team_rows = {tid: await get_pool_team(tid) for tid in ids}
 
-    places = {1: (team_rows[champion_id]["name"], team_rows[champion_id].get("logo_url"))}
+    places = {1: team_rows[champion_id]}
     if runner_up_id:
-        places[2] = (team_rows[runner_up_id]["name"], team_rows[runner_up_id].get("logo_url"))
+        places[2] = team_rows[runner_up_id]
     if third_place_id:
-        places[3] = (team_rows[third_place_id]["name"], team_rows[third_place_id].get("logo_url"))
+        places[3] = team_rows[third_place_id]
+    return places
+
+
+async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracket: str) -> discord.File:
+    """Podium-Grafik fuer den Bracket-Abschluss: Erster/Zweiter/Dritter (soweit ermittelbar)."""
+    t = await get_tournament(tournament_id)
+    bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+    places = await get_bracket_podium_places(tournament_id, champion_id, bracket)
+    image_places = {rank: (row["name"], row.get("logo_url")) for rank, row in places.items()}
 
     from graphics import render_podium_image
-    buf = await render_podium_image(f"{bracket_label} Champion", t["name"], places)
+    buf = await render_podium_image(f"{bracket_label} Champion", t["name"], image_places)
     return discord.File(buf, filename="podium.png")
+
+
+async def build_bracket_finish_text(tournament_id: int, champion_id: int, bracket: str) -> str:
+    """Vollstaendige Platzierung als lesbarer Text (fuer die Components-V2-Nachricht neben dem Podium-Bild)."""
+    places = await get_bracket_podium_places(tournament_id, champion_id, bracket)
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = [f"{medals[rank]} **{row['name']}**" for rank, row in sorted(places.items())]
+    return "\n".join(lines)
 
 
 async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_id: int, score1: int, score2: int):
@@ -696,7 +712,18 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
         _, champion_id, _ = result
         podium_file = await build_bracket_finish_file(match["tournament_id"], champion_id, bracket)
         if bracket_channel:
-            await bracket_channel.send(file=podium_file)
+            podium_text = await build_bracket_finish_text(match["tournament_id"], champion_id, bracket)
+            bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+            t_row = await get_tournament(match["tournament_id"])
+            view = discord.ui.LayoutView(timeout=None)
+            view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"# 🏆 {bracket_label} Champion\n{t_row['name']}"),
+                discord.ui.Separator(),
+                discord.ui.TextDisplay(podium_text),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media=podium_file)),
+                accent_color=discord.Color.gold(),
+            ))
+            await bracket_channel.send(view=view, files=[podium_file])
 
         champion_field = "winner_champion_id" if bracket == "winner" else "loser_champion_id"
         await pool2.execute(f"UPDATE tournaments SET {champion_field} = $1 WHERE id = $2", champion_id, match["tournament_id"])

@@ -25,6 +25,7 @@ from cogs.tournament_manager import (
     get_pool_team,
     team_name_map,
     build_bracket_finish_file,
+    build_bracket_finish_text,
 )
 
 POSITION_GROUPS = {
@@ -242,6 +243,41 @@ def compute_top11(agg: dict[str, PlayerAgg]) -> dict[str, list[PlayerAgg]]:
     return result
 
 
+async def build_awards_text(bracket: str, awards: dict[str, PlayerAgg]) -> str:
+    """Vollstaendige Auflistung aller Awards als lesbarer Text (fuer die Components-V2-Nachricht neben der Grafik)."""
+    if not awards:
+        return "_Keine EA-Match-Daten gefunden._"
+    team_names = await team_name_map([p.team_id for p in awards.values()])
+    metric_texts = {
+        "Bester Spieler": lambda p: f"Score {p.score:.1f}",
+        "Bester Torschütze": lambda p: f"{p.goals} Tore",
+        "Bester Aufleger": lambda p: f"{p.assists} Vorlagen",
+        "Bester Verteidiger": lambda p: f"Score {p.score:.1f}",
+        "Goldener Handschuh": lambda p: f"Score {p.score:.1f}",
+    }
+    lines = []
+    for award_name, p in awards.items():
+        lines.append(f"**{award_name}:** {p.name} ({team_names.get(p.team_id, '?')}) — {metric_texts[award_name](p)}")
+    return "\n".join(lines)
+
+
+async def build_top11_text(top11: dict[str, list[PlayerAgg]]) -> str:
+    """Vollstaendige Top-11-Aufstellung als lesbarer Text (fuer die Components-V2-Nachricht neben der Grafik)."""
+    all_players = [p for group in top11.values() for p in group]
+    if not all_players:
+        return "_Keine EA-Match-Daten gefunden._"
+    team_names = await team_name_map([p.team_id for p in all_players])
+    group_labels = {"GK": "Torwart", "DEF": "Verteidigung", "MID": "Mittelfeld", "FWD": "Sturm"}
+    blocks = []
+    for group in ["GK", "DEF", "MID", "FWD"]:
+        players = top11.get(group, [])
+        if not players:
+            continue
+        names = "\n".join(f"{p.name} ({team_names.get(p.team_id, '?')}) — {p.score:.1f}" for p in players)
+        blocks.append(f"**{group_labels[group]}**\n{names}")
+    return "\n\n".join(blocks)
+
+
 async def build_awards_embed(tournament_id: int, bracket: str, awards: dict[str, PlayerAgg]) -> discord.Embed:
     t = await get_tournament(tournament_id)
     label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
@@ -336,14 +372,17 @@ async def build_top11_image(tournament_id: int, bracket: str, top11: dict[str, l
     return await render_top11_image(f"Team des Turniers — {label}", f"{t['name']} · Formation 3-5-2", formation_slots)
 
 
-def build_stat_image_view(title_text: str, file_obj: discord.File) -> discord.ui.LayoutView:
-    """Bettet eine generierte Grafik (Podium/Awards/Top11) sauber in Components V2 ein statt sie nackt zu posten."""
+def build_stat_image_view(title_text: str, file_obj: discord.File, body_text: str | None = None) -> discord.ui.LayoutView:
+    """Bettet eine generierte Grafik (Podium/Awards/Top11) sauber in Components V2 ein, MIT voller Textauflistung
+    (nicht nur ein Titel) - der komplette Inhalt (Namen, Teams, Werte) steht so auch als durchsuchbarer Text da,
+    nicht nur in der Grafik."""
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(
-        discord.ui.TextDisplay(title_text),
-        discord.ui.MediaGallery(discord.MediaGalleryItem(media=file_obj)),
-        accent_color=discord.Color.gold(),
-    ))
+    items = [discord.ui.TextDisplay(title_text)]
+    if body_text:
+        items.append(discord.ui.Separator())
+        items.append(discord.ui.TextDisplay(body_text))
+    items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=file_obj)))
+    view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
     return view
 
 
@@ -388,8 +427,9 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
 
     if top3_channel:
         podium_file = await build_bracket_finish_file(tournament_id, champion_id, bracket)
+        podium_text = await build_bracket_finish_text(tournament_id, champion_id, bracket)
         await top3_channel.send(
-            view=build_stat_image_view(f"# 🏆 {bracket_label} Champion\n{t['name']}", podium_file),
+            view=build_stat_image_view(f"# 🏆 {bracket_label} Champion\n{t['name']}", podium_file, podium_text),
             files=[podium_file],
         )
 
@@ -401,8 +441,9 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
         image = await build_awards_image(tournament_id, bracket, awards)
         if image:
             awards_file = discord.File(image, filename="awards.png")
+            awards_text = await build_awards_text(bracket, awards)
             await awards_channel.send(
-                view=build_stat_image_view(f"# 🏅 Turnier-Awards — {bracket_label}\n{t['name']}", awards_file),
+                view=build_stat_image_view(f"# 🏅 Turnier-Awards — {bracket_label}\n{t['name']}", awards_file, awards_text),
                 files=[awards_file],
             )
         else:
@@ -411,8 +452,9 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
         image = await build_top11_image(tournament_id, bracket, top11)
         if image:
             top11_file = discord.File(image, filename="top11.png")
+            top11_text = await build_top11_text(top11)
             await top11_channel.send(
-                view=build_stat_image_view(f"# ⭐ Team des Turniers — {bracket_label}\n{t['name']} · Formation 3-5-2", top11_file),
+                view=build_stat_image_view(f"# ⭐ Team des Turniers — {bracket_label}\n{t['name']} · Formation 3-5-2", top11_file, top11_text),
                 files=[top11_file],
             )
         else:
