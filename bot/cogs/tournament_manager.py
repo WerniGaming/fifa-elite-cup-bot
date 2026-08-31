@@ -2171,54 +2171,44 @@ class TournamentPanel(discord.ui.LayoutView):
         group_size = group_size_for(bracket_size)
         num_groups = max(1, bracket_size // group_size)
 
-        # Block 1: Titel, Datum, Spielrhythmus, Zeitplan
-        top_lines = [
-            f"## {t['name']} [`{bracket_size} Teams`]",
-            "",
-            f"**Datum:** {fmt_date_de(schedule['turnierstart']) if schedule else '_noch nicht festgelegt_'}",
-            "",
-            f"**Spielrhythmus:** `{rhythmus} Minuten` pro Runde",
-        ]
+        # Block: Kopf - Name, Größe, Eckdaten
+        header_lines = [f"# 🏆 {t['name']}", f"`{bracket_size} Teams` · {num_groups} Gruppen à {group_size} Teams · Winner + Loser Bracket"]
+        header_lines.append("")
+        header_lines.append(f"📅 **Start:** {fmt_date_de(schedule['turnierstart']) if schedule else '_noch nicht festgelegt_'}")
+        header_lines.append(f"⏱️ **Spielrhythmus:** {rhythmus} Minuten pro Runde")
         if t.get("stream_link"):
-            top_lines.append(f"**Stream:** {t['stream_link']}")
+            header_lines.append(f"🔴 **Stream:** {t['stream_link']}")
+        header_block = discord.ui.TextDisplay("\n".join(header_lines))
 
+        # Block: Zeitplan
+        schedule_block = None
         if schedule:
-            top_lines += [
+            schedule_lines = [
+                "### 🗓️ Zeitplan",
+                f"> **Anmeldeschluss:** {fmt_time_de(schedule['anmeldeschluss'])} ({fmt_relative_days_de(schedule['anmeldeschluss'])})",
+                f"> **Check-in:** {fmt_time_de(schedule['checkin_start'])} – {fmt_time_de(schedule['checkin_end'])}",
+                f"> **Gruppenauslosung:** {fmt_time_de(schedule['gruppenauslosung'])}",
+                f"> **Anpfiff:** {fmt_time_de(schedule['turnierstart'])}",
                 "",
-                "### Zeitplan",
+                f"**Gruppenphase** _(geschätzt {schedule['matchdays']} Spieltage à {rhythmus} Min, Ende ca. {fmt_time_de(schedule['group_end'])})_",
+                f"**KO-Phase** _(geschätzt {schedule['ko_rounds']} Runden, Winner + Loser parallel)_",
                 "",
-                f"**Anmeldeschluss:** `{fmt_time_de(schedule['anmeldeschluss'])}` (`{fmt_relative_days_de(schedule['anmeldeschluss'])}`)",
-                f"**Check-In:** `{fmt_time_de(schedule['checkin_start'])}` - `{fmt_time_de(schedule['checkin_end'])}`",
-                f"**Gruppenauslosung:** `{fmt_time_de(schedule['gruppenauslosung'])}`",
-                f"**Turnierstart:** `{fmt_time_de(schedule['turnierstart'])}`",
-                "",
-                "**Gruppenphase** _(geschätzt)_",
-                f"> `{schedule['matchdays']}` Spieltage à `{rhythmus} Min`",
-                f"> Ende: ca. `{fmt_time_de(schedule['group_end'])}`",
-                "",
-                "**KO-Phase** _(geschätzt)_",
-                f"> `{schedule['ko_rounds']}` Runden (Winner + Loser parallel)",
-                "",
-                f"**Ende:** ca. `{fmt_time_de(schedule['ko_end'])}`",
-                f"-# Zeiten basieren auf {bracket_size}er Turnier - Änderungen möglich",
+                f"🏁 **Voraussichtliches Ende:** {fmt_time_de(schedule['ko_end'])}",
+                f"-# Schätzung für {bracket_size}er Turnier — kann sich noch verschieben",
             ]
-        top_text = "\n".join(top_lines)
+            schedule_block = discord.ui.TextDisplay("\n".join(schedule_lines))
 
-        # Block 2: Mannschaftsliste + Warteliste
+        # Block: Mannschaftsliste + Warteliste
         activity_check_phase = t["status"] == "closed" and t.get("phase") == "signup"
         confirmed_count = sum(1 for tm in registered_teams if tm.get("confirmed_active")) if activity_check_phase else 0
         paid_team_ids = t.get("_paid_team_ids", set()) if t.get("is_donation_tournament") else set()
 
-        team_lines = [
-            f"### {bracket_size}er Turnier — {num_groups} Gruppen à {group_size} Teams | Winner + Loser Bracket",
-            "",
-        ]
+        team_lines = ["### 📋 Gemeldete Teams"]
         if activity_check_phase:
-            team_lines.append(f"**Aktivitätscheck:** `{confirmed_count}` / `{registered}` Teams bestätigt")
-            team_lines.append("")
+            team_lines.append(f"✅ **Aktivitätscheck:** {confirmed_count}/{registered} Teams bestätigt")
         if t.get("is_donation_tournament"):
-            team_lines.append(f"**Bezahlt:** `{len(paid_team_ids)}` / `{registered}` Teams 💰")
-            team_lines.append("")
+            team_lines.append(f"💰 **Bezahlt:** {len(paid_team_ids)}/{registered} Teams")
+        team_lines.append("")
         for i in range(1, bracket_size + 1):
             if i <= registered:
                 team = registered_teams[i - 1]
@@ -2229,16 +2219,16 @@ class TournamentPanel(discord.ui.LayoutView):
                 team_lines.append(f"`{i}.` –")
 
         if waitlist_teams:
-            team_lines += ["", f"**Warteliste ({len(waitlist_teams)}):**"]
+            team_lines += ["", f"**⏳ Warteliste ({len(waitlist_teams)}):**"]
             for i, team in enumerate(waitlist_teams, start=1):
                 team_lines.append(f"`{i}.` {team['name']} (<@{team['owner_discord_id']}>)")
-        team_text = "\n".join(team_lines)
+        team_block = discord.ui.TextDisplay("\n".join(team_lines))
 
-        # Block 3: Erklaerungstext (nach den Buttons)
-        explanation = (
-            "-# Die Turniergröße wächst automatisch mit den Anmeldungen — jede weitere Anmeldung kann also "
-            "das Turnier vergrößern. Passt ein Team nicht mehr in die aktuelle Stufe, landet es auf der "
-            "Warteliste und rutscht nach, sobald genug Anmeldungen für die nächstgrößere Stufe da sind."
+        # Block: Erklaerungstext (nach den Buttons)
+        explanation = discord.ui.TextDisplay(
+            "-# Die Turniergröße wächst automatisch mit den Anmeldungen — jede weitere Anmeldung kann das Turnier "
+            "also noch größer machen. Passt ein Team nicht mehr in die aktuelle Stufe, wartet es auf der Warteliste "
+            "und rückt nach, sobald genug Anmeldungen für die nächste Stufe da sind."
         )
 
         closed = t["status"] != "open"
@@ -2246,9 +2236,12 @@ class TournamentPanel(discord.ui.LayoutView):
         if os.path.exists(TOURNAMENT_BANNER_PATH):
             self.banner_file = discord.File(TOURNAMENT_BANNER_PATH, filename="tournament_banner.jpg")
             items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
-        items.append(discord.ui.TextDisplay(top_text))
+        items.append(header_block)
+        if schedule_block:
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
+            items.append(schedule_block)
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
-        items.append(discord.ui.TextDisplay(team_text))
+        items.append(team_block)
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
 
         if activity_check_phase:
@@ -2282,7 +2275,7 @@ class TournamentPanel(discord.ui.LayoutView):
                 )
             )
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
-        items.append(discord.ui.TextDisplay(explanation))
+        items.append(explanation)
         container = discord.ui.Container(*items, accent_color=discord.Color.gold())
         self.add_item(container)
 
