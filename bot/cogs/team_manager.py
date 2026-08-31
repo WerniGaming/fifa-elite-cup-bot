@@ -69,6 +69,18 @@ async def _toggle_configured_role(guild: discord.Guild, member: discord.Member, 
         log.exception(f"Fehler beim {'Vergeben' if grant else 'Entziehen'} der Rolle {role_id} an {member}")
 
 
+async def reset_team_nickname(member: discord.Member):
+    """Setzt den Nickname zurueck (Discord zeigt dann wieder den normalen Usernamen), falls er noch das 'Team | ...'-Format hat."""
+    if "|" not in (member.nick or ""):
+        return
+    try:
+        await member.edit(nick=None)
+    except discord.Forbidden:
+        log.warning(f"Konnte Nickname von {member} nicht zuruecksetzen (fehlende Berechtigung).")
+    except discord.HTTPException:
+        log.exception(f"Fehler beim Zuruecksetzen des Nicknames fuer {member}")
+
+
 async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
     """Baut die Stream-Link-Uebersicht neu auf (oder legt sie an) im konfigurierten Kanal."""
     pool = get_pool()
@@ -470,6 +482,7 @@ class CoManagerView(discord.ui.View):
         member = interaction.guild.get_member(user.id)
         if member:
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=False)
+            await reset_team_nickname(member)
         await interaction.response.send_message(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
 
 
@@ -483,8 +496,17 @@ class LeaveConfirmView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         pool = get_pool()
         if self.is_owner:
+            # Team wird komplett geloescht - Rolle/Nickname bei ALLEN Managern (Owner + Co-Manager)
+            # zuruecksetzen, nicht nur beim Owner der gerade klickt.
+            managers = await get_team_managers(self.team["id"])
             await pool.execute("DELETE FROM teams WHERE id = $1", self.team["id"])
-            await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=False)
+            for m in managers:
+                member = interaction.guild.get_member(m["discord_id"])
+                if not member:
+                    continue
+                role_column = "vm_role_id" if m["role"] == "owner" else "co_manager_role_id"
+                await _toggle_configured_role(interaction.guild, member, role_column, grant=False)
+                await reset_team_nickname(member)
             await interaction.response.edit_message(content=f"🗑️ Team **{self.team['name']}** wurde gelöscht.", view=None)
             if self.team.get("stream_link"):
                 await refresh_stream_list(interaction.client, interaction.guild)
@@ -494,6 +516,7 @@ class LeaveConfirmView(discord.ui.View):
                 self.team["id"], interaction.user.id,
             )
             await _toggle_configured_role(interaction.guild, interaction.user, "co_manager_role_id", grant=False)
+            await reset_team_nickname(interaction.user)
             await interaction.response.edit_message(content=f"👋 Du hast **{self.team['name']}** verlassen.", view=None)
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
