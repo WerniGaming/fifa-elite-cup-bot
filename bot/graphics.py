@@ -288,7 +288,7 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
 
     img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
     draw = ImageDraw.Draw(img)
-    draw.text((36, 26), f"📋 {title}", font=_font(30), fill=GOLD)
+    draw.text((36, 26), title, font=_font(30), fill=GOLD)
     draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
 
     y = header_h

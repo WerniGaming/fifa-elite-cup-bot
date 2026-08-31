@@ -613,7 +613,7 @@ async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracke
         places[3] = (team_rows[third_place_id]["name"], team_rows[third_place_id].get("logo_url"))
 
     from graphics import render_podium_image
-    buf = await render_podium_image(f"🏆 {bracket_label} Champion", t["name"], places)
+    buf = await render_podium_image(f"{bracket_label} Champion", t["name"], places)
     return discord.File(buf, filename="podium.png")
 
 
@@ -998,12 +998,18 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Solange nicht
     jedes Team der Gruppe 'Team ist da' bestaetigt hat, zeigt das Panel eine
     Check-in-Checkliste statt der Tabelle - Spieltag 1 bleibt so lange blockiert.
+    Die Spielplan-Grafik wird per MediaGallery eingebettet (view.schedule_file
+    muss vom Aufrufer zusaetzlich in files= mitgegeben werden).
     """
     pool = get_pool()
+    group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
     team_rows = await pool.fetch(
         "SELECT team_id, confirmed_ready FROM tournament_group_teams WHERE group_id = $1", group_id
     )
     view = discord.ui.LayoutView(timeout=None)
+    schedule_file = await build_group_schedule_file(dict(group))
+    view.schedule_file = schedule_file
+    media = discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file))
     all_ready = all(tr["confirmed_ready"] for tr in team_rows) if team_rows else True
 
     if not all_ready:
@@ -1017,6 +1023,7 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
             discord.ui.ActionRow(
                 discord.ui.Button(label="Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
             ),
+            media,
             accent_color=discord.Color.gold(),
         )
         view.add_item(container)
@@ -1025,6 +1032,7 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     standings_text = await build_group_standings_text(group_id)
     container = discord.ui.Container(
         discord.ui.TextDisplay(standings_text),
+        media,
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
@@ -1154,8 +1162,7 @@ async def create_group_panel_channel(guild: discord.Guild, category: discord.Cat
         f"gruppe-{group['group_number']}-panel", category=category, overwrites=overwrites
     )
     panel = await build_group_panel(group["id"])
-    schedule_file = await build_group_schedule_file(group)
-    msg = await panel_channel.send(view=panel, files=[schedule_file])
+    msg = await panel_channel.send(view=panel, files=[panel.schedule_file])
     await pool.execute(
         "UPDATE tournament_groups SET panel_channel_id = $1, panel_message_id = $2 WHERE id = $3",
         panel_channel.id, msg.id, group["id"],
@@ -1188,8 +1195,7 @@ async def refresh_group_panel(bot: commands.Bot, group_id: int):
     except discord.HTTPException:
         return
     panel = await build_group_panel(group_id)
-    schedule_file = await build_group_schedule_file(group)
-    await msg.edit(view=panel, attachments=[schedule_file])
+    await msg.edit(view=panel, attachments=[panel.schedule_file])
 
 
 async def get_live_schedule_channel(bot: commands.Bot, guild: discord.Guild):
@@ -1682,6 +1688,7 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
     )
     view = discord.ui.LayoutView(timeout=None)
     if not matches:
+        view.schedule_file = None
         view.add_item(discord.ui.Container(discord.ui.TextDisplay(f"### {label}\n_Noch keine Paarungen._"), accent_color=discord.Color.gold()))
         return view
 
@@ -1705,7 +1712,12 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
         else:
             block.append(f"⏳ {t1} 🆚 {t2}")
 
-    view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(block)), accent_color=discord.Color.gold()))
+    items = [discord.ui.TextDisplay("\n".join(block))]
+    schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
+    view.schedule_file = schedule_file
+    if schedule_file:
+        items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file)))
+    view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
     return view
 
 
@@ -1717,8 +1729,7 @@ async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int,
 
     panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], overwrites=overwrites)
     panel = await build_bracket_panel_view(tournament_id, bracket)
-    schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
-    msg = await panel_channel.send(view=panel, files=[schedule_file] if schedule_file else [])
+    msg = await panel_channel.send(view=panel, files=[panel.schedule_file] if panel.schedule_file else [])
     await pool.execute(
         "UPDATE tournament_bracket_meta SET panel_channel_id = $1, panel_message_id = $2 WHERE tournament_id = $3 AND bracket = $4",
         panel_channel.id, msg.id, tournament_id, bracket,
@@ -1744,8 +1755,7 @@ async def refresh_bracket_panel(bot: commands.Bot, tournament_id: int, bracket: 
     except discord.HTTPException:
         return
     panel = await build_bracket_panel_view(tournament_id, bracket)
-    schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
-    await msg.edit(view=panel, attachments=[schedule_file] if schedule_file else [])
+    await msg.edit(view=panel, attachments=[panel.schedule_file] if panel.schedule_file else [])
 
 
 async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int]) -> list[dict]:

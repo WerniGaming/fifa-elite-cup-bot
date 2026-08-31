@@ -818,6 +818,7 @@ class TeamManagerCog(commands.Cog):
                 row["name"], row["ea_club_name"], row.get("logo_url"), division_text, medals, record_text, goals_text
             )
             stats_card_file = discord.File(buf, filename="stats_card.png")
+            items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=stats_card_file)))
 
         if division or league_points or cup_has_data:
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))

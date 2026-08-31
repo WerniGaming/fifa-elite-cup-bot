@@ -317,7 +317,7 @@ async def build_awards_image(tournament_id: int, bracket: str, awards: dict[str,
         for award_name, p in awards.items()
     ]
     from graphics import render_awards_image
-    return await render_awards_image(f"🏆 Turnier-Awards — {label}", t["name"], entries)
+    return await render_awards_image(f"Turnier-Awards — {label}", t["name"], entries)
 
 
 async def build_top11_image(tournament_id: int, bracket: str, top11: dict[str, list[PlayerAgg]]) -> io.BytesIO | None:
@@ -333,7 +333,18 @@ async def build_top11_image(tournament_id: int, bracket: str, top11: dict[str, l
         for group, players in top11.items()
     }
     from graphics import render_top11_image
-    return await render_top11_image(f"⭐ Team des Turniers — {label}", f"{t['name']} · Formation 3-5-2", formation_slots)
+    return await render_top11_image(f"Team des Turniers — {label}", f"{t['name']} · Formation 3-5-2", formation_slots)
+
+
+def build_stat_image_view(title_text: str, file_obj: discord.File) -> discord.ui.LayoutView:
+    """Bettet eine generierte Grafik (Podium/Awards/Top11) sauber in Components V2 ein statt sie nackt zu posten."""
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(title_text),
+        discord.ui.MediaGallery(discord.MediaGalleryItem(media=file_obj)),
+        accent_color=discord.Color.gold(),
+    ))
+    return view
 
 
 async def get_guild_settings(guild_id: int) -> dict:
@@ -373,9 +384,14 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
     awards_channel = await get_ch(awards_channel_id)
     top11_channel = await get_ch(top11_channel_id)
 
+    bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
+
     if top3_channel:
         podium_file = await build_bracket_finish_file(tournament_id, champion_id, bracket)
-        await top3_channel.send(file=podium_file)
+        await top3_channel.send(
+            view=build_stat_image_view(f"# 🏆 {bracket_label} Champion\n{t['name']}", podium_file),
+            files=[podium_file],
+        )
 
     agg, found_count, total_count = await aggregate_bracket_stats(tournament_id, bracket)
     awards = compute_awards(agg)
@@ -384,13 +400,21 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
     if awards_channel:
         image = await build_awards_image(tournament_id, bracket, awards)
         if image:
-            await awards_channel.send(file=discord.File(image, filename="awards.png"))
+            awards_file = discord.File(image, filename="awards.png")
+            await awards_channel.send(
+                view=build_stat_image_view(f"# 🏅 Turnier-Awards — {bracket_label}\n{t['name']}", awards_file),
+                files=[awards_file],
+            )
         else:
             await awards_channel.send(embed=await build_awards_embed(tournament_id, bracket, awards))
     if top11_channel:
         image = await build_top11_image(tournament_id, bracket, top11)
         if image:
-            await top11_channel.send(file=discord.File(image, filename="top11.png"))
+            top11_file = discord.File(image, filename="top11.png")
+            await top11_channel.send(
+                view=build_stat_image_view(f"# ⭐ Team des Turniers — {bracket_label}\n{t['name']} · Formation 3-5-2", top11_file),
+                files=[top11_file],
+            )
         else:
             await top11_channel.send(embed=await build_top11_embed(tournament_id, bracket, top11))
 
