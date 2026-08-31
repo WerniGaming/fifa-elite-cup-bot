@@ -1384,12 +1384,16 @@ def generate_group_schedule(team_ids: list[int]) -> list[list[tuple[int, int]]]:
     return schedule
 
 
+def _reminder_view(text: str) -> discord.ui.LayoutView:
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.orange()))
+    return view
+
+
 async def send_matchday_reminder(channel: discord.abc.Messageable, matchday: int):
     await asyncio.sleep(MATCHDAY_REMINDER_SECONDS)
     try:
-        await channel.send(
-            f"⏰ 5 Minuten sind um - alle Teams müssen jetzt für **Spieltag {matchday}** im Spiel sein."
-        )
+        await channel.send(view=_reminder_view(f"⏰ Die 5 Minuten sind um — **Spieltag {matchday}** muss jetzt laufen."))
     except discord.HTTPException:
         pass
 
@@ -1397,9 +1401,7 @@ async def send_matchday_reminder(channel: discord.abc.Messageable, matchday: int
 async def send_ko_round_reminder(channel: discord.abc.Messageable, round_label: str):
     await asyncio.sleep(MATCHDAY_REMINDER_SECONDS)
     try:
-        await channel.send(
-            f"⏰ 5 Minuten sind um - alle Teams müssen jetzt fürs **{round_label}** im Spiel sein."
-        )
+        await channel.send(view=_reminder_view(f"⏰ Die 5 Minuten sind um — **{round_label}** muss jetzt laufen."))
     except discord.HTTPException:
         pass
 
@@ -1426,23 +1428,28 @@ async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, 
         if m["team1_id"] is None or m["team2_id"] is None:
             real_team_id = m["team1_id"] or m["team2_id"]
             pairing_lines.append(
-                f"- **{names.get(real_team_id, '?')}** {manager_mentions.get(real_team_id, '')} hat diese Runde "
-                "**Freilos** - kein Spiel nötig, gilt automatisch als erledigt."
+                f"> **{names.get(real_team_id, '?')}** {manager_mentions.get(real_team_id, '')} steht ohne Gegner da — "
+                "Freilos, kein Spiel nötig."
             )
         else:
             pairing_lines.append(
-                f"- **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} lädt "
-                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} ein "
-                f"(EA-Club-Namen: {ea_names.get(m['team1_id'], '?')} vs. {ea_names.get(m['team2_id'], '?')})"
+                f"> **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} vs. "
+                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
+                f"— EA-Club-Namen: `{ea_names.get(m['team1_id'], '?')}` vs. `{ea_names.get(m['team2_id'], '?')}`"
             )
 
-    text = (
-        f"📢 **{round_label} ist freigegeben!**\n"
-        + "\n".join(pairing_lines)
-        + "\n\nIhr habt jetzt **5 Minuten** Zeit, den Gegner ins Spiel einzuladen. "
-        "Sucht dabei genau nach dem oben genannten EA-Club-Namen."
-    )
-    await channel.send(text)
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(f"# 📢 {round_label} ist freigegeben\nSo wird gespielt:"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("\n".join(pairing_lines)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(
+            "-# Ihr habt **5 Minuten**, um den Gegner unter dem oben genannten EA-Club-Namen ins Spiel einzuladen."
+        ),
+        accent_color=discord.Color.gold(),
+    ))
+    await channel.send(view=view)
     asyncio.create_task(send_ko_round_reminder(channel, round_label))
 
 
@@ -1475,21 +1482,27 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
         if m["team1_id"] is None or m["team2_id"] is None:
             real_team_id = m["team1_id"] or m["team2_id"]
             pairing_lines.append(
-                f"- **{names.get(real_team_id, '?')}** {manager_mentions.get(real_team_id, '')} hat diesen "
-                "Spieltag **Freilos** - kein Spiel nötig, gilt automatisch als erledigt."
+                f"> **{names.get(real_team_id, '?')}** {manager_mentions.get(real_team_id, '')} steht ohne Gegner da — "
+                "Freilos, kein Spiel nötig."
             )
         else:
             pairing_lines.append(
-                f"- **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} lädt "
-                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} ein "
-                f"(EA-Club-Namen: {ea_names.get(m['team1_id'], '?')} vs. {ea_names.get(m['team2_id'], '?')})"
+                f"> **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} vs. "
+                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
+                f"— EA-Club-Namen: `{ea_names.get(m['team1_id'], '?')}` vs. `{ea_names.get(m['team2_id'], '?')}`"
             )
-    text = (
-        f"📢 **Spieltag {matchday} ist freigegeben!**\n"
-        + "\n".join(pairing_lines)
-        + "\n\nIhr habt jetzt **5 Minuten** Zeit, den Gegner ins Spiel einzuladen. "
-        "Sucht dabei genau nach dem oben genannten EA-Club-Namen."
-    )
+
+    view = discord.ui.LayoutView(timeout=None)
+    view.add_item(discord.ui.Container(
+        discord.ui.TextDisplay(f"# 📢 Spieltag {matchday} ist freigegeben\nSo wird gespielt:"),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay("\n".join(pairing_lines)),
+        discord.ui.Separator(),
+        discord.ui.TextDisplay(
+            "-# Ihr habt **5 Minuten**, um den Gegner unter dem oben genannten EA-Club-Namen ins Spiel einzuladen."
+        ),
+        accent_color=discord.Color.gold(),
+    ))
 
     channel = guild.get_channel(group["channel_id"])
     if channel is None:
@@ -1499,13 +1512,19 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
             channel = None
 
     if channel:
-        await channel.send(text)
+        await channel.send(view=view)
         await pool.execute("UPDATE tournament_groups SET released_round = $1 WHERE id = $2", matchday, group_id)
         asyncio.create_task(send_matchday_reminder(channel, matchday))
 
         try:
             schedule_file = await build_group_schedule_file(dict(group))
-            await channel.send(file=schedule_file)
+            schedule_view = discord.ui.LayoutView(timeout=None)
+            schedule_view.add_item(discord.ui.Container(
+                discord.ui.TextDisplay(f"### 📋 Aktueller Spielplan — Gruppe {group['group_number']}"),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file)),
+                accent_color=discord.Color.gold(),
+            ))
+            await channel.send(view=schedule_view, files=[schedule_file])
         except Exception:
             log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Gruppe {group_id}")
 
@@ -2411,10 +2430,16 @@ async def notify_teams_new_tournament(bot: commands.Bot, guild_id: int, tourname
         for m in managers:
             try:
                 user = await bot.fetch_user(m["discord_id"])
-                await user.send(
-                    f"📢 Neues Turnier **{tournament_name}**!\n"
-                    f"Melde dein Team **{team['name']}** jetzt an: {channel.mention}"
-                )
+                view = discord.ui.LayoutView(timeout=None)
+                view.add_item(discord.ui.Container(
+                    discord.ui.TextDisplay(
+                        f"# 📢 Neues Turnier: {tournament_name}\n"
+                        f"Meld dein Team **{team['name']}** jetzt an, bevor die Plätze weg sind:\n"
+                        f"{channel.mention}"
+                    ),
+                    accent_color=discord.Color.gold(),
+                ))
+                await user.send(view=view)
             except discord.HTTPException:
                 pass
 
