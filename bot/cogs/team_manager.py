@@ -847,6 +847,50 @@ class TeamManagerCog(commands.Cog):
         league_points = seasonal.get("leaguePoints") or seasonal.get("skillRating")
         cup_has_data = cup_stats and (cup_stats["wins"] or cup_stats["draws"] or cup_stats["losses"])
 
+        # Freundschaftsspiele zuerst auswerten (wird unten fuer Text UND als Karten-Fallback gebraucht,
+        # falls das Team noch keine Cup-Historie hat - sonst waere die Karte bei neuen Teams komplett leer).
+        player_totals: dict[str, dict] = {}
+        friendly_lines = []
+        friendly_wins = friendly_draws = friendly_losses = 0
+        friendly_goals_for = friendly_goals_against = 0
+        for m in matches[:5]:
+            clubs = m.get("clubs", {})
+            club_ids = list(clubs.keys())
+            if len(club_ids) < 2:
+                continue
+            opponent_id = club_ids[0] if club_ids[1] == str(club_id) else club_ids[1]
+            my_goals = clubs.get(str(club_id), {}).get("goals", "?")
+            opp_goals = clubs.get(opponent_id, {}).get("goals", "?")
+            opp_name = clubs.get(opponent_id, {}).get("details", {}).get("name", "Unbekannt")
+            friendly_lines.append(f"`{my_goals}:{opp_goals}` vs. {opp_name}")
+            try:
+                mg, og = int(my_goals), int(opp_goals)
+                friendly_goals_for += mg
+                friendly_goals_against += og
+                if mg > og:
+                    friendly_wins += 1
+                elif mg < og:
+                    friendly_losses += 1
+                else:
+                    friendly_draws += 1
+            except (TypeError, ValueError):
+                pass
+
+            club_players = m.get("players", {}).get(str(club_id))
+            if club_players:
+                for player_id, p in club_players.items():
+                    name = p.get("playername") or p.get("proName") or f"Player {player_id}"
+                    if player_id not in player_totals:
+                        player_totals[player_id] = {"name": name, "matches": 0, "goals": 0, "assists": 0, "rating_sum": 0.0}
+                    entry = player_totals[player_id]
+                    entry["matches"] += 1
+                    entry["goals"] += int(p.get("goals") or 0)
+                    entry["assists"] += int(p.get("assists") or 0)
+                    try:
+                        entry["rating_sum"] += float(p.get("rating") or 0)
+                    except (TypeError, ValueError):
+                        pass
+
         from graphics import render_club_stats_card
         division_text = f"Division {division}" + (f" · {league_points} Punkte" if league_points else "") if division else None
         medals = []
@@ -857,11 +901,17 @@ class TeamManagerCog(commands.Cog):
                 medals.append(f"🥈×{cup_stats['loser_bracket_titles']}")
             if cup_stats["third_places"]:
                 medals.append(f"🥉×{cup_stats['third_places']}")
-        record_text = f"{cup_stats['wins']}S {cup_stats['draws']}U {cup_stats['losses']}N" if cup_has_data else None
-        goals_text = None
         if cup_has_data:
             gd = cup_stats["goals_for"] - cup_stats["goals_against"]
+            record_text = f"Cup: {cup_stats['wins']}S {cup_stats['draws']}U {cup_stats['losses']}N"
             goals_text = f"Tore {cup_stats['goals_for']}:{cup_stats['goals_against']} (Diff {gd:+d})"
+        elif friendly_wins or friendly_draws or friendly_losses:
+            fgd = friendly_goals_for - friendly_goals_against
+            record_text = f"Friendlys: {friendly_wins}S {friendly_draws}U {friendly_losses}N"
+            goals_text = f"Tore {friendly_goals_for}:{friendly_goals_against} (Diff {fgd:+d})"
+        else:
+            record_text = None
+            goals_text = None
         buf = await render_club_stats_card(
             row["name"], row["ea_club_name"], row.get("logo_url"), division_text, medals, record_text, goals_text
         )
@@ -886,34 +936,6 @@ class TeamManagerCog(commands.Cog):
                 block.append(f"Bilanz: `{cup_stats['wins']}S {cup_stats['draws']}U {cup_stats['losses']}N`")
                 block.append(f"Tore: `{cup_stats['goals_for']}:{cup_stats['goals_against']}` (Diff. `{goal_diff:+d}`)")
             items.append(discord.ui.TextDisplay("\n".join(block)))
-
-        player_totals: dict[str, dict] = {}
-        friendly_lines = []
-        for m in matches[:5]:
-            clubs = m.get("clubs", {})
-            club_ids = list(clubs.keys())
-            if len(club_ids) < 2:
-                continue
-            opponent_id = club_ids[0] if club_ids[1] == str(club_id) else club_ids[1]
-            my_goals = clubs.get(str(club_id), {}).get("goals", "?")
-            opp_goals = clubs.get(opponent_id, {}).get("goals", "?")
-            opp_name = clubs.get(opponent_id, {}).get("details", {}).get("name", "Unbekannt")
-            friendly_lines.append(f"`{my_goals}:{opp_goals}` vs. {opp_name}")
-
-            club_players = m.get("players", {}).get(str(club_id))
-            if club_players:
-                for player_id, p in club_players.items():
-                    name = p.get("playername") or p.get("proName") or f"Player {player_id}"
-                    if player_id not in player_totals:
-                        player_totals[player_id] = {"name": name, "matches": 0, "goals": 0, "assists": 0, "rating_sum": 0.0}
-                    entry = player_totals[player_id]
-                    entry["matches"] += 1
-                    entry["goals"] += int(p.get("goals") or 0)
-                    entry["assists"] += int(p.get("assists") or 0)
-                    try:
-                        entry["rating_sum"] += float(p.get("rating") or 0)
-                    except (TypeError, ValueError):
-                        pass
 
         if friendly_lines:
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
