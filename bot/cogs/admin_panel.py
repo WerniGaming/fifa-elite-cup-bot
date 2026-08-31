@@ -905,7 +905,7 @@ class TournamentAdminView(discord.ui.View):
             await interaction.followup.send(view=error_embed("Keine Gruppen gefunden (Gruppenphase noch nicht gestartet?)."), ephemeral=True)
             return
 
-        from graphics import generate_group_schedule_images
+        from cogs.tournament_manager import build_group_schedule_file
 
         posted, failed = 0, 0
         for group in groups:
@@ -917,30 +917,8 @@ class TournamentAdminView(discord.ui.View):
                     failed += 1
                     continue
             try:
-                all_group_matches = await pool.fetch(
-                    "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group["id"]
-                )
-                all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
-                    m["team2_id"] for m in all_group_matches if m["team2_id"]
-                }
-                team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
-
-                max_matchday = max((m["round"] for m in all_group_matches), default=0)
-                matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
-                for m in all_group_matches:
-                    if m["team1_id"] is None or m["team2_id"] is None:
-                        continue
-                    idx = m["round"] - 1
-                    t1, t2 = team_rows[m["team1_id"]], team_rows[m["team2_id"]]
-                    matchdays_data[idx].append({
-                        "team1_name": t1["name"], "team2_name": t2["name"],
-                        "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
-                    })
-
-                image_bufs = await generate_group_schedule_images(matchdays_data)
-                for i, buf in enumerate(image_bufs, start=1):
-                    suffix = f"_teil{i}" if len(image_bufs) > 1 else ""
-                    await channel.send(file=discord.File(buf, filename=f"spielplan_gruppe_{group['group_number']}{suffix}.png"))
+                schedule_file = await build_group_schedule_file(dict(group))
+                await channel.send(file=schedule_file)
                 posted += 1
             except Exception:
                 logging.getLogger("fifa-elite-cup").exception(f"Fehler beim nachtraeglichen Posten der Spielplan-Grafik fuer Gruppe {group['id']}")

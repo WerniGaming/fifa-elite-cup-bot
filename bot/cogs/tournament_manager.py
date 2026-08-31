@@ -812,7 +812,8 @@ class ScoreModal(discord.ui.Modal):
         image_file = None
         if match["phase"] == "group" and match.get("group_id"):
             try:
-                image_file = await build_group_schedule_image_for_round(match["group_id"], match["round"])
+                group = await get_pool().fetchrow("SELECT * FROM tournament_groups WHERE id = $1", match["group_id"])
+                image_file = await build_group_schedule_file(dict(group))
             except Exception:
                 log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Bestaetigungs-Embed (Match {self.match_id})")
 
@@ -1054,6 +1055,38 @@ def build_group_actions_view(group_id: int) -> discord.ui.LayoutView:
     return view
 
 
+async def build_group_schedule_matchdays(group_id: int) -> list[list[dict]]:
+    """Alle Matches einer Gruppe, nach Spieltag gruppiert, inkl. aktuellem Ergebnis (fuer die Spielplan-Grafik)."""
+    pool = get_pool()
+    all_group_matches = await pool.fetch(
+        "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group_id
+    )
+    all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
+        m["team2_id"] for m in all_group_matches if m["team2_id"]
+    }
+    team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
+    max_matchday = max((m["round"] for m in all_group_matches), default=0)
+    matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
+    for m in all_group_matches:
+        if m["team1_id"] is None or m["team2_id"] is None:
+            continue
+        idx = m["round"] - 1
+        t1, t2 = team_rows[m["team1_id"]], team_rows[m["team2_id"]]
+        matchdays_data[idx].append({
+            "team1_name": t1["name"], "team2_name": t2["name"],
+            "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
+            "team1_score": m["team1_score"], "team2_score": m["team2_score"], "status": m["status"],
+        })
+    return matchdays_data
+
+
+async def build_group_schedule_file(group: dict) -> discord.File:
+    from graphics import render_group_schedule_image
+    matchdays = await build_group_schedule_matchdays(group["id"])
+    buf = await render_group_schedule_image(f"Gruppe {group['group_number']}", matchdays)
+    return discord.File(buf, filename="spielplan.png")
+
+
 async def create_group_panel_channel(guild: discord.Guild, category: discord.CategoryChannel, group: dict) -> discord.TextChannel:
     """
     Legt einen eigenen 'nur Panel'-Kanal fuer eine Gruppe an (z.B. 'gruppe-1-panel'),
@@ -1073,7 +1106,8 @@ async def create_group_panel_channel(guild: discord.Guild, category: discord.Cat
         f"gruppe-{group['group_number']}-panel", category=category, overwrites=overwrites
     )
     panel = await build_group_panel(group["id"])
-    msg = await panel_channel.send(view=panel)
+    schedule_file = await build_group_schedule_file(group)
+    msg = await panel_channel.send(view=panel, files=[schedule_file])
     await pool.execute(
         "UPDATE tournament_groups SET panel_channel_id = $1, panel_message_id = $2 WHERE id = $3",
         panel_channel.id, msg.id, group["id"],
@@ -1106,7 +1140,8 @@ async def refresh_group_panel(bot: commands.Bot, group_id: int):
     except discord.HTTPException:
         return
     panel = await build_group_panel(group_id)
-    await msg.edit(view=panel)
+    schedule_file = await build_group_schedule_file(group)
+    await msg.edit(view=panel, attachments=[schedule_file])
 
 
 async def get_live_schedule_channel(bot: commands.Bot, guild: discord.Guild):
@@ -1330,45 +1365,6 @@ async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, 
     asyncio.create_task(send_ko_round_reminder(channel, round_label))
 
 
-async def build_group_schedule_image_for_round(group_id: int, round_num: int) -> discord.File | None:
-    """Rendert NUR das Bild-Segment (max. 3 Spieltage), das den angegebenen Spieltag enthaelt."""
-    pool = get_pool()
-    all_group_matches = await pool.fetch(
-        "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group_id
-    )
-    if not all_group_matches:
-        return None
-    group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
-
-    all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
-        m["team2_id"] for m in all_group_matches if m["team2_id"]
-    }
-    team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
-
-    max_matchday = max(m["round"] for m in all_group_matches)
-    matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
-    for m in all_group_matches:
-        if m["team1_id"] is None or m["team2_id"] is None:
-            continue
-        idx = m["round"] - 1
-        t1, t2 = team_rows[m["team1_id"]], team_rows[m["team2_id"]]
-        matchdays_data[idx].append({
-            "team1_name": t1["name"], "team2_name": t2["name"],
-            "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
-        })
-
-    from graphics import MATCHDAYS_PER_IMAGE, generate_group_schedule_images
-    chunk_index = (round_num - 1) // MATCHDAYS_PER_IMAGE
-    start = chunk_index * MATCHDAYS_PER_IMAGE
-    relevant_chunk = matchdays_data[start:start + MATCHDAYS_PER_IMAGE]
-    if not relevant_chunk:
-        return None
-
-    image_bufs = await generate_group_schedule_images(relevant_chunk)
-    if not image_bufs:
-        return None
-    return discord.File(image_bufs[0], filename=f"spielplan_gruppe_{group['group_number']}.png")
-
 
 async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: int, matchday: int):
     """Gibt einen Spieltag frei: postet Paarungen im Gruppenkanal, DMt alle Manager, startet 5-Min-Reminder."""
@@ -1427,31 +1423,8 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
         asyncio.create_task(send_matchday_reminder(channel, matchday))
 
         try:
-            all_group_matches = await pool.fetch(
-                "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group_id
-            )
-            all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
-                m["team2_id"] for m in all_group_matches if m["team2_id"]
-            }
-            team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
-
-            max_matchday = max((m["round"] for m in all_group_matches), default=0)
-            matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
-            for m in all_group_matches:
-                if m["team1_id"] is None or m["team2_id"] is None:
-                    continue  # Freilose werden in der Grafik nicht dargestellt
-                idx = m["round"] - 1
-                t1, t2 = team_rows[m["team1_id"]], team_rows[m["team2_id"]]
-                matchdays_data[idx].append({
-                    "team1_name": t1["name"], "team2_name": t2["name"],
-                    "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
-                })
-
-            from graphics import generate_group_schedule_images
-            image_bufs = await generate_group_schedule_images(matchdays_data)
-            for i, buf in enumerate(image_bufs, start=1):
-                suffix = f"_teil{i}" if len(image_bufs) > 1 else ""
-                await channel.send(file=discord.File(buf, filename=f"spielplan_gruppe_{group['group_number']}{suffix}.png"))
+            schedule_file = await build_group_schedule_file(dict(group))
+            await channel.send(file=schedule_file)
         except Exception:
             log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Gruppe {group_id}")
 

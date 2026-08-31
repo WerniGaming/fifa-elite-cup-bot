@@ -1,8 +1,8 @@
 """
-Grafik-Modul: erzeugt die 'Spielplan'-Grafik(en) fuer eine Gruppe (3 Spieltage
-pro Bild, bis zu 3 Spiele pro Spieltag), mit Teamnamen und Logos ueberlagert
-auf der vom Nutzer gestalteten Vorlage. Gruppen mit mehr als 3 Spieltagen
-(z.B. 6er-Gruppen mit 5 Spieltagen) bekommen automatisch mehrere Bilder.
+Grafik-Modul: rendert alle Bot-Grafiken (Spielplan, Awards, Team of the
+Tournament) programmatisch mit PIL im einheitlichen dunkel/gold-Design -
+kein statisches Bild-Template mehr noetig, Layouts passen sich automatisch
+an Team-/Gruppengroesse an.
 """
 from __future__ import annotations
 import io
@@ -14,52 +14,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger("fifa-elite-cup")
 
-TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "assets", "spielplan_template.png")
 FONT_BOLD = os.path.join(os.path.dirname(__file__), "assets", "fonts", "Poppins-Bold.ttf")
 if not os.path.exists(FONT_BOLD):
     FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-# Basis-Koordinaten Spalte 1 (Spieltag 1), Reihe 1 - vermessen an der Vorlage
-SHIELD_L = (65, 409, 127, 471)
-NAME_L = (139, 426, 245, 472)
-NAME_R = (317, 426, 422, 472)
-SHIELD_R = (433, 409, 495, 471)
-
-COL_OFFSETS = [0, 492, 978]  # Spieltag 1 / 2 / 3 innerhalb EINES Bildes
-ROW_OFFSET = 158  # Abstand zwischen den 3 Reihen pro Spieltag
-MATCHDAYS_PER_IMAGE = 3
-ROWS_PER_COLUMN = 3
-
-
-def _shift(box: tuple[int, int, int, int], dx: int, dy: int) -> tuple[int, int, int, int]:
-    return (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy)
-
-
-def _box_for(col: int, row: int):
-    dx, dy = COL_OFFSETS[col], ROW_OFFSET * row
-    return _shift(SHIELD_L, dx, dy), _shift(NAME_L, dx, dy), _shift(NAME_R, dx, dy), _shift(SHIELD_R, dx, dy)
-
-
-def _fit_text(draw: ImageDraw.ImageDraw, text: str, box, max_size=22, min_size=9) -> ImageFont.FreeTypeFont:
-    x1, y1, x2, y2 = box
-    w, h = x2 - x1, y2 - y1
-    size = max_size
-    while size > min_size:
-        font = ImageFont.truetype(FONT_BOLD, size)
-        bbox = draw.textbbox((0, 0), text, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        if tw <= w - 10 and th <= h - 6:
-            return font
-        size -= 1
-    return ImageFont.truetype(FONT_BOLD, min_size)
-
-
-def _draw_centered(draw: ImageDraw.ImageDraw, text: str, box, font, fill=(255, 215, 80)):
-    x1, y1, x2, y2 = box
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-    draw.text((cx - tw / 2 - bbox[0], cy - th / 2 - bbox[1]), text, font=font, fill=fill)
 
 
 async def _fetch_logo(session: aiohttp.ClientSession, url: str | None, label: str = "") -> Image.Image | None:
@@ -89,43 +46,6 @@ def _paste_logo(img: Image.Image, logo: Image.Image | None, box):
     lx = x1 + pad + (target_w - logo_copy.width) // 2
     ly = y1 + pad + (target_h - logo_copy.height) // 2
     img.paste(logo_copy, (lx, ly), logo_copy)
-
-
-async def _render_single_image(matchdays_chunk: list[list[dict]], session: aiohttp.ClientSession) -> io.BytesIO:
-    """Rendert EIN Bild mit bis zu 3 Spieltag-Spalten (matchdays_chunk hat max. 3 Eintraege)."""
-    img = Image.open(TEMPLATE_PATH).convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    for col in range(len(matchdays_chunk)):
-        matches = matchdays_chunk[col]
-        for row in range(ROWS_PER_COLUMN):
-            shield_l, name_l, name_r, shield_r = _box_for(col, row)
-
-            if row >= len(matches):
-                # Leerer Slot -> komplette Zeile diagonal durchstreichen
-                x1 = shield_l[0]
-                x2 = shield_r[2]
-                y1 = min(shield_l[1], name_l[1])
-                y2 = max(shield_l[3], name_l[3])
-                draw.line([(x1, y1), (x2, y2)], fill=(120, 90, 20), width=3)
-                draw.line([(x1, y2), (x2, y1)], fill=(120, 90, 20), width=3)
-                continue
-
-            m = matches[row]
-            f1 = _fit_text(draw, m["team1_name"], name_l)
-            f2 = _fit_text(draw, m["team2_name"], name_r)
-            _draw_centered(draw, m["team1_name"], name_l, f1)
-            _draw_centered(draw, m["team2_name"], name_r, f2)
-
-            logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])
-            logo2 = await _fetch_logo(session, m.get("team2_logo_url"), m["team2_name"])
-            _paste_logo(img, logo1, shield_l)
-            _paste_logo(img, logo2, shield_r)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
 
 
 GOLD = (255, 215, 80)
@@ -243,21 +163,68 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     return buf
 
 
-async def generate_group_schedule_images(matchdays: list[list[dict]]) -> list[io.BytesIO]:
+async def render_group_schedule_image(group_label: str, matchdays: list[list[dict]]) -> io.BytesIO:
     """
-    matchdays: eine Liste mit EINEM Eintrag pro Spieltag (beliebig viele,
-    nicht nur 3), jeder Eintrag ist eine Liste von Matches: {"team1_name",
-    "team2_name","team1_logo_url","team2_logo_url"}.
+    Programmatischer Spielplan im Awards/Top11-Stil (dunkel/gold), kein Template noetig -
+    passt sich automatisch an Anzahl Spieltage/Spiele an. Ergebnisse werden direkt mit
+    angezeigt (Aufruf bei jeder Ergebnis-Aenderung, siehe refresh_group_panel).
+    Match-Dict: team1_name, team2_name, team1_logo_url, team2_logo_url, team1_score,
+    team2_score, status.
+    """
+    width = 1000
+    header_h = 90
+    matchday_header_h = 46
+    row_h = 78
+    padding_bottom = 20
 
-    Die Vorlage hat Platz fuer 3 Spieltage x 3 Spiele pro Bild. Gruppen mit
-    mehr als 3 Spieltagen (z.B. 6er-Gruppen mit 5 Spieltagen) werden auf
-    mehrere Bilder aufgeteilt, damit KEIN Spieltag verloren geht.
-    Gibt eine Liste von PNG-Bytes zurueck (normalerweise 1 Bild, bei groesseren
-    Gruppen mehr).
-    """
-    chunks = [matchdays[i:i + MATCHDAYS_PER_IMAGE] for i in range(0, len(matchdays), MATCHDAYS_PER_IMAGE)] or [[]]
-    images = []
+    matchdays_with_games = [md for md in matchdays if md]
+    total_rows = sum(len(md) for md in matchdays_with_games)
+    height = header_h + len(matchdays_with_games) * matchday_header_h + total_rows * row_h + padding_bottom
+
+    img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
+    draw = ImageDraw.Draw(img)
+    draw.text((36, 26), f"📋 Spielplan — {group_label}", font=_font(30), fill=GOLD)
+    draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
+
+    y = header_h
+    logo_size = 48
+    name_font = _font(19)
+    score_font = _font(23)
+
     async with aiohttp.ClientSession() as session:
-        for chunk in chunks:
-            images.append(await _render_single_image(chunk, session))
-    return images
+        for md_idx, matches in enumerate(matchdays, start=1):
+            if not matches:
+                continue
+            draw.text((36, y + 10), f"Spieltag {md_idx}", font=_font(18), fill=GREY)
+            y += matchday_header_h
+            for m in matches:
+                row_bottom = y + row_h - 12
+                draw.rounded_rectangle([(26, y), (width - 26, row_bottom)], radius=12, fill=CARD_BG)
+                cy = (y + row_bottom) // 2
+
+                logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])
+                _paste_logo(img, logo1, (44, cy - logo_size // 2, 44 + logo_size, cy + logo_size // 2))
+                t1_name = m["team1_name"][:22]
+                draw.text((44 + logo_size + 16, cy - 12), t1_name, font=name_font, fill=WHITE)
+
+                logo2 = await _fetch_logo(session, m.get("team2_logo_url"), m["team2_name"])
+                _paste_logo(img, logo2, (width - 44 - logo_size, cy - logo_size // 2, width - 44, cy + logo_size // 2))
+                t2_name = m["team2_name"][:22]
+                t2w, _ = _text_size(draw, t2_name, name_font)
+                draw.text((width - 44 - logo_size - 16 - t2w, cy - 12), t2_name, font=name_font, fill=WHITE)
+
+                if m.get("status") == "completed" and m.get("team1_score") is not None:
+                    score_text, score_fill = f"{m['team1_score']} : {m['team2_score']}", GOLD
+                else:
+                    score_text, score_fill = "vs", GREY
+                stw, _ = _text_size(draw, score_text, score_font)
+                draw.text((width / 2 - stw / 2, cy - 14), score_text, font=score_font, fill=score_fill)
+
+                y += row_h
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
