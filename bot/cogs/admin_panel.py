@@ -1194,7 +1194,8 @@ class AdminPanel(discord.ui.LayoutView):
             "**🏆 Turniere** — anlegen, verwalten, komplette Team-Liste einsehen\n"
             "**🔨 Moderation** — Spieler/Teams sperren, Ticket-System konfigurieren\n"
             "**📣 Kommunikation** — eigene Ankündigungen posten, DM an alle Vereinsmanager\n"
-            "**⚙️ System** — Stats-Kanäle, Rollen (Admin/Moderator/VM/Co-Manager), Nicknames, Stream-Liste"
+            "**⚙️ System** — Stats-Kanäle, Rollen (Admin/Moderator/VM/Co-Manager), Nicknames, Stream-Liste\n"
+            "**🗓️ Kalender** — Termine für Cups/Ligen/Sonstiges anlegen, Kalender-Kanal einstellen"
         )
         media_items = []
         if os.path.exists(ADMIN_BANNER_PATH):
@@ -1210,6 +1211,7 @@ class AdminPanel(discord.ui.LayoutView):
                 discord.ui.Button(label="Moderation", style=discord.ButtonStyle.danger, custom_id="admincat:moderation"),
                 discord.ui.Button(label="Kommunikation", style=discord.ButtonStyle.secondary, custom_id="admincat:communication"),
                 discord.ui.Button(label="System", style=discord.ButtonStyle.secondary, custom_id="admincat:system"),
+                discord.ui.Button(label="Kalender", style=discord.ButtonStyle.secondary, custom_id="admincat:calendar"),
             ),
             accent_color=discord.Color.gold(),
         )
@@ -1249,11 +1251,13 @@ class AdminPanelCog(commands.Cog):
 
         if custom_id.startswith("admincat:"):
             category = custom_id.split(":", 1)[1]
+            from cogs.calendar import CalendarMenu
             menus = {
                 "tournaments": AdminTournamentsMenu(),
                 "moderation": AdminModerationMenu(),
                 "communication": AdminCommunicationMenu(),
                 "system": AdminSystemMenu(),
+                "calendar": CalendarMenu(),
             }
             menu = menus.get(category)
             if menu is None:

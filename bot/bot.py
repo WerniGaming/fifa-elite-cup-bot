@@ -22,6 +22,7 @@ INITIAL_COGS = [
     "cogs.tickets",
     "cogs.welcome",
     "cogs.admin_panel",
+    "cogs.calendar",
 ]
 
 

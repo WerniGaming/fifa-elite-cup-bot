@@ -2368,6 +2368,13 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
         tournament_id = row["id"]
         t = await get_tournament(tournament_id)
 
+        try:
+            from cogs.calendar import create_event_for_tournament, refresh_calendar
+            await create_event_for_tournament(interaction.guild_id, tournament_id, self.name.value, start_time, interaction.user.id)
+            await refresh_calendar(interaction.client, interaction.guild)
+        except Exception:
+            log.exception(f"Fehler beim automatischen Anlegen des Kalender-Eintrags fuer Turnier {tournament_id}")
+
         await interaction.followup.send(
             view=success_embed(f"Turnier {self.name.value} erstellt", f"ID `{tournament_id}`"),
             ephemeral=True,
