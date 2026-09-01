@@ -200,6 +200,31 @@ async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> tuple[dic
     return agg, found_count, total_count
 
 
+async def persist_player_stats(tournament_id: int, bracket: str, agg: dict[str, "PlayerAgg"]):
+    """Schreibt die aggregierten Spielerdaten dauerhaft weg (fuer die Website-Statistikseite).
+    UPSERT pro (Turnier, Bracket, Team, Spielername) - kein zusaetzlicher EA-API-Call noetig,
+    nutzt nur die Daten, die aggregate_bracket_stats() ohnehin schon abgerufen hat."""
+    if not agg:
+        return
+    pool = get_pool()
+    rows = [
+        (tournament_id, bracket, e.team_id, e.name, e.matches, e.goals, e.assists, e.mom, e.saves, round(e.avg_rating, 2), e.main_position)
+        for e in agg.values()
+    ]
+    await pool.executemany(
+        """
+        INSERT INTO tournament_player_stats
+            (tournament_id, bracket, team_id, player_name, matches, goals, assists, mom, saves, avg_rating, position_group)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (tournament_id, bracket, team_id, player_name) DO UPDATE SET
+            matches = EXCLUDED.matches, goals = EXCLUDED.goals, assists = EXCLUDED.assists,
+            mom = EXCLUDED.mom, saves = EXCLUDED.saves, avg_rating = EXCLUDED.avg_rating,
+            position_group = EXCLUDED.position_group, updated_at = now()
+        """,
+        rows,
+    )
+
+
 def compute_awards(agg: dict[str, PlayerAgg]) -> dict[str, PlayerAgg]:
     players = list(agg.values())
     if not players:
@@ -434,6 +459,7 @@ async def post_bracket_stats(bot: commands.Bot, guild: discord.Guild, tournament
         )
 
     agg, found_count, total_count = await aggregate_bracket_stats(tournament_id, bracket)
+    await persist_player_stats(tournament_id, bracket, agg)
     awards = compute_awards(agg)
     top11 = compute_top11(agg)
 

@@ -2318,6 +2318,42 @@ async def refresh_panel(bot: commands.Bot, tournament_id: int):
         await msg.edit(view=panel)
 
 
+async def handle_external_signup_change(bot: commands.Bot, tournament_id: int, team_id: int):
+    """Reagiert auf eine An-/Abmeldung, die ueber die Website (statt Discord) passiert ist -
+    aktualisiert das Discord-Panel und legt bei Spendenturnieren bei Bedarf den
+    Zahlungs-Ticket-Kanal an (dieselben Funktionen wie beim Discord-Signup-Button,
+    kein doppelter Code fuer Discord-spezifische Nebenwirkungen)."""
+    await reconcile_signups(tournament_id)
+    await refresh_panel(bot, tournament_id)
+
+    t = await get_tournament(tournament_id)
+    signup = await get_team_signup(tournament_id, team_id)
+    if not t or not signup or signup["status"] != "registered" or not t.get("is_donation_tournament"):
+        return
+
+    pool = get_pool()
+    already_has_ticket = await pool.fetchval(
+        "SELECT 1 FROM tickets WHERE tournament_id = $1 AND team_id = $2", tournament_id, team_id
+    )
+    if already_has_ticket:
+        return
+
+    guild = bot.get_guild(t["guild_id"])
+    if guild is None:
+        try:
+            guild = await bot.fetch_guild(t["guild_id"])
+        except discord.HTTPException:
+            return
+
+    team_row = await pool.fetchrow("SELECT * FROM teams WHERE id = $1", team_id)
+    if not team_row:
+        return
+    team_row = dict(team_row)
+
+    from cogs.tickets import create_payment_ticket
+    await create_payment_ticket(bot, guild, t, team_row)
+
+
 # ---------- Modal: Turnier erstellen ----------
 
 class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
