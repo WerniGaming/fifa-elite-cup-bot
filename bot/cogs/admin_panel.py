@@ -277,6 +277,27 @@ class AdminSystemMenu(discord.ui.View):
         self.add_item(discord.ui.Button(label="Team-Nicknames aktualisieren", style=discord.ButtonStyle.secondary, custom_id="admin:syncnicknames"))
         self.add_item(discord.ui.Button(label="Stream-Liste aktualisieren", style=discord.ButtonStyle.secondary, custom_id="admin:refreshstreams"))
         self.add_item(discord.ui.Button(label="Team-Manager (Admin)", style=discord.ButtonStyle.secondary, custom_id="admin:teammanager"))
+        self.add_item(discord.ui.Button(label="Live-Log-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setauditchannel"))
+
+
+class AuditChannelSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        select = discord.ui.ChannelSelect(placeholder="Live-Log-Kanal wählen...", channel_types=[discord.ChannelType.text])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, audit_log_channel_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET audit_log_channel_id = $2",
+            interaction.guild_id, channel_id,
+        )
+        await interaction.response.edit_message(
+            content=None, view=success_embed("Live-Log-Kanal gesetzt", f"<#{channel_id}>")
+        )
 
 
 class TicketConfigView(discord.ui.View):
@@ -336,6 +357,8 @@ class ResetKoConfirmView(discord.ui.View):
             await reset_knockout_phase(interaction.client, interaction.guild, self.tournament_id)
             t = await get_tournament(self.tournament_id)
             await start_knockout_phase(interaction.client, interaction.guild, self.tournament_id, t)
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "tournament.bracket_created", "tournament", self.tournament_id, "KO-Phase zurückgesetzt & neu erstellt")
             await interaction.followup.send(view=success_embed("KO-Phase wurde zurückgesetzt und neu erstellt."), ephemeral=True)
         except Exception:
             log.exception(f"Fehler beim Zuruecksetzen/Neuerstellen der KO-Phase fuer Turnier {self.tournament_id}")
@@ -881,6 +904,8 @@ class TournamentAdminView(discord.ui.View):
             t = await get_tournament(self.t["id"])
 
         await start_knockout_phase(interaction.client, interaction.guild, self.t["id"], t)
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "tournament.bracket_created", "tournament", self.t["id"], "KO-Phase gestartet")
         await interaction.followup.send(view=success_embed("KO-Phase gestartet!"), ephemeral=True)
 
     @discord.ui.button(label="KO-Phase resetten", style=discord.ButtonStyle.danger)
@@ -1129,6 +1154,8 @@ class ConfirmDeleteView(discord.ui.View):
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         pool = get_pool()
         await pool.execute("DELETE FROM tournaments WHERE id = $1", self.tournament_id)
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "tournament.deleted", "tournament", self.tournament_id)
         await interaction.response.edit_message(content=None, view=success_embed("Turnier gelöscht."))
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
@@ -1342,6 +1369,16 @@ class AdminPanelCog(commands.Cog):
 
         elif action == "dmall":
             await interaction.response.send_modal(DMBroadcastModal())
+
+        elif action == "setauditchannel":
+            pool = get_pool()
+            row = await pool.fetchrow("SELECT audit_log_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            current = f"<#{row['audit_log_channel_id']}>" if row and row["audit_log_channel_id"] else "keiner gesetzt"
+            await interaction.response.send_message(
+                content=f"**Live-Log-Kanal einstellen**\nAktuell: {current}\nJede protokollierte Aktion (Team-/Turnier-Verwaltung, Bans, Kalender, An-/Abmeldungen, Ergebnisse) wird sofort hier gepostet.",
+                view=AuditChannelSelectView(),
+                ephemeral=True,
+            )
 
         elif action == "setrole":
             pool = get_pool()

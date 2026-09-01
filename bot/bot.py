@@ -6,6 +6,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+import audit
 import db
 
 load_dotenv()
@@ -36,6 +37,7 @@ class FifaEliteCupBot(commands.Bot):
     async def setup_hook(self):
         await db.init_pool()
         log.info("Datenbank-Pool initialisiert.")
+        audit.set_bot(self)
 
         for ext in INITIAL_COGS:
             await self.load_extension(ext)

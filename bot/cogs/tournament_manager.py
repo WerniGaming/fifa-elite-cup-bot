@@ -788,6 +788,8 @@ class ScoreModal(discord.ui.Modal):
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
                 await finalize_match_result(interaction.client, interaction.guild, self.match_id, s1, s2)
+                from audit import log_action
+                await log_action(interaction.guild_id, interaction.user, "match.result_confirmed", "match", self.match_id, f"{s1}:{s2} (Admin)")
                 await interaction.followup.send(view=success_embed(f"Admin-Ergebnis gespeichert: {s1}:{s2}"), ephemeral=True)
             except Exception:
                 log.exception(f"Fehler beim Verarbeiten des Admin-Ergebnisses für Match {self.match_id}")
@@ -813,6 +815,8 @@ class ScoreModal(discord.ui.Modal):
             """,
             s1, s2, reporter_team_id, self.match_id,
         )
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "match.result_reported", "match", self.match_id, f"{s1}:{s2}")
         match = await get_match(self.match_id)
         names = await team_name_map([match["team1_id"], match["team2_id"]])
         opponent_managers = await get_team_managers(opponent_team_id)
@@ -2763,6 +2767,11 @@ class TournamentCog(commands.Cog):
         if decision == "yes":
             await interaction.response.defer(thinking=True)
             await finalize_match_result(self.bot, interaction.guild, match_id, match["team1_score"], match["team2_score"])
+            from audit import log_action
+            await log_action(
+                interaction.guild_id, interaction.user, "match.result_confirmed", "match", match_id,
+                f"{match['team1_score']}:{match['team2_score']}",
+            )
             names = await team_name_map([match["team1_id"], match["team2_id"]])
             await interaction.followup.send(
                 view=success_embed(
