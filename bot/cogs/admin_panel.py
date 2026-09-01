@@ -278,6 +278,7 @@ class AdminSystemMenu(discord.ui.View):
         self.add_item(discord.ui.Button(label="Stream-Liste aktualisieren", style=discord.ButtonStyle.secondary, custom_id="admin:refreshstreams"))
         self.add_item(discord.ui.Button(label="Team-Manager (Admin)", style=discord.ButtonStyle.secondary, custom_id="admin:teammanager"))
         self.add_item(discord.ui.Button(label="Live-Log-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setauditchannel"))
+        self.add_item(discord.ui.Button(label="Live-Ergebnis-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setresultschannel"))
 
 
 class AuditChannelSelectView(discord.ui.View):
@@ -297,6 +298,26 @@ class AuditChannelSelectView(discord.ui.View):
         )
         await interaction.response.edit_message(
             content=None, view=success_embed("Live-Log-Kanal gesetzt", f"<#{channel_id}>")
+        )
+
+
+class ResultsChannelSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        select = discord.ui.ChannelSelect(placeholder="Live-Ergebnis-Kanal wählen...", channel_types=[discord.ChannelType.text])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, results_feed_channel_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET results_feed_channel_id = $2",
+            interaction.guild_id, channel_id,
+        )
+        await interaction.response.edit_message(
+            content=None, view=success_embed("Live-Ergebnis-Kanal gesetzt", f"<#{channel_id}>")
         )
 
 
@@ -1380,6 +1401,16 @@ class AdminPanelCog(commands.Cog):
             await interaction.response.send_message(
                 content=f"**Live-Log-Kanal einstellen**\nAktuell: {current}\nJede protokollierte Aktion (Team-/Turnier-Verwaltung, Bans, Kalender, An-/Abmeldungen, Ergebnisse) wird sofort hier gepostet.",
                 view=AuditChannelSelectView(),
+                ephemeral=True,
+            )
+
+        elif action == "setresultschannel":
+            pool = get_pool()
+            row = await pool.fetchrow("SELECT results_feed_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            current = f"<#{row['results_feed_channel_id']}>" if row and row["results_feed_channel_id"] else "keiner gesetzt"
+            await interaction.response.send_message(
+                content=f"**Live-Ergebnis-Kanal einstellen**\nAktuell: {current}\nJedes fertig gespielte Match wird sofort hier gepostet.",
+                view=ResultsChannelSelectView(),
                 ephemeral=True,
             )
 

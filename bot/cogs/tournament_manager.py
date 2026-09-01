@@ -633,6 +633,33 @@ async def build_bracket_finish_text(tournament_id: int, champion_id: int, bracke
     return "\n".join(lines)
 
 
+async def post_live_result(bot: commands.Bot, guild: discord.Guild, match: dict, score1: int, score2: int, winner_id: int | None):
+    """Postet jedes fertig gespielte Match sofort in den konfigurierten Live-Ergebnis-Kanal (falls eingerichtet) -
+    Pendant zum Ticker-Band auf der Website."""
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT results_feed_channel_id FROM guild_settings WHERE guild_id = $1", guild.id)
+    channel_id = row["results_feed_channel_id"] if row else None
+    if not channel_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return
+
+    names = await team_name_map([match["team1_id"], match["team2_id"]])
+    t1, t2 = names.get(match["team1_id"], "?"), names.get(match["team2_id"], "?")
+    if winner_id == match["team1_id"]:
+        t1 = f"**{t1}**"
+    elif winner_id == match["team2_id"]:
+        t2 = f"**{t2}**"
+    try:
+        await channel.send(f"⚽ {t1} `{score1}:{score2}` {t2} — <{WEBSITE_URL}/stats>", allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException:
+        pass
+
+
 async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_id: int, score1: int, score2: int):
     """Setzt das Ergebnis final, bestimmt den Sieger und schaltet die Phase ggf. weiter."""
     pool = get_pool()
@@ -651,6 +678,7 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
         """,
         score1, score2, winner_id, match_id,
     )
+    await post_live_result(bot, guild, match, score1, score2, winner_id)
 
     t = await get_tournament(match["tournament_id"])
 

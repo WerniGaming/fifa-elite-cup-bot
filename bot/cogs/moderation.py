@@ -365,21 +365,29 @@ def _format_entry(e: dict) -> str:
 
 
 class AuditLogView(discord.ui.View):
-    def __init__(self, guild_id: int, offset: int = 0):
+    def __init__(self, guild_id: int, offset: int = 0, action_filter: str | None = None):
         super().__init__(timeout=180)
         self.guild_id = guild_id
         self.offset = offset
+        self.action_filter = action_filter
 
     async def render(self) -> discord.ui.LayoutView:
         pool = get_pool()
-        entries = await pool.fetch(
-            "SELECT * FROM audit_log WHERE guild_id = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3",
-            self.guild_id, self.offset, PAGE_SIZE,
-        )
+        if self.action_filter:
+            entries = await pool.fetch(
+                "SELECT * FROM audit_log WHERE guild_id = $1 AND action = $2 ORDER BY created_at DESC OFFSET $3 LIMIT $4",
+                self.guild_id, self.action_filter, self.offset, PAGE_SIZE,
+            )
+        else:
+            entries = await pool.fetch(
+                "SELECT * FROM audit_log WHERE guild_id = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3",
+                self.guild_id, self.offset, PAGE_SIZE,
+            )
         entries = [dict(e) for e in entries]
 
+        filter_note = f" · Filter: {ACTION_LABELS.get(self.action_filter, self.action_filter)}" if self.action_filter else ""
         lines = "\n".join(_format_entry(e) for e in entries) if entries else "_Keine Einträge auf dieser Seite._"
-        text = f"# 📋 Audit-Log\n-# Einträge {self.offset + 1}–{self.offset + len(entries)}\n\n{lines}"
+        text = f"# 📋 Audit-Log\n-# Einträge {self.offset + 1}–{self.offset + len(entries)}{filter_note}\n\n{lines}"
 
         self.clear_items()
         prev_btn = discord.ui.Button(label="⬅️ Neuer", style=discord.ButtonStyle.secondary, disabled=self.offset == 0)
@@ -408,11 +416,15 @@ class ModerationCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(name="audit_log", description="Zeigt das Audit-Log (wer hat wann was gemacht) - nur Admins")
-    async def audit_log(self, interaction: discord.Interaction):
+    @app_commands.describe(aktion="Nur diese Art von Aktion anzeigen (optional)")
+    @app_commands.choices(aktion=[
+        app_commands.Choice(name=label, value=key) for key, label in ACTION_LABELS.items()
+    ])
+    async def audit_log(self, interaction: discord.Interaction, aktion: app_commands.Choice[str] | None = None):
         if not await is_tournament_admin(interaction.user):
             await interaction.response.send_message(view=error_embed("Nur Admins können das Audit-Log einsehen."), ephemeral=True)
             return
-        pager = AuditLogView(interaction.guild_id)
+        pager = AuditLogView(interaction.guild_id, action_filter=aktion.value if aktion else None)
         view = await pager.render()
         await interaction.response.send_message(view=view, ephemeral=True)
 
