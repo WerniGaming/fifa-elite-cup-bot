@@ -256,6 +256,7 @@ class AdminModerationMenu(discord.ui.View):
         self.add_item(discord.ui.Button(label="Team sperren", style=discord.ButtonStyle.danger, custom_id="admin:banteam"))
         self.add_item(discord.ui.Button(label="Sperren verwalten", style=discord.ButtonStyle.secondary, custom_id="admin:banlist"))
         self.add_item(discord.ui.Button(label="Ticket-System einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:ticketconfig"))
+        self.add_item(discord.ui.Button(label="Audit-Log", style=discord.ButtonStyle.secondary, custom_id="admin:auditlog"))
 
 
 class AdminCommunicationMenu(discord.ui.View):
@@ -1329,6 +1330,12 @@ class AdminPanelCog(commands.Cog):
                     lines.append(f"**{b['team_name']}** - bis {until} - Grund: {b['reason'] or 'keiner'}")
                 blocks.append("\n".join(lines))
             await interaction.response.send_message(content="\n\n".join(blocks), view=UnbanSelect(user_bans, team_bans), ephemeral=True)
+
+        elif action == "auditlog":
+            from cogs.moderation import AuditLogView
+            pager = AuditLogView(interaction.guild_id)
+            log_view = await pager.render()
+            await interaction.response.send_message(view=log_view, ephemeral=True)
 
         elif action == "embed":
             await interaction.response.send_modal(EmbedBuilderModal())

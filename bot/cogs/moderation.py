@@ -11,12 +11,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed
+from permissions import is_tournament_admin
 from cogs.team_manager import get_team_managers
 from cogs.tournament_manager import reconcile_signups, refresh_panel
+from audit import ACTION_LABELS
 
 
 # ---------- Spieler-Sperren ----------
@@ -174,6 +177,8 @@ class BanReasonModal(discord.ui.Modal):
                 """,
                 interaction.guild_id, self.target_id, self.reason.value or None, interaction.user.id, expires_at,
             )
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "ban.user_added", "user", self.target_id, self.reason.value or until_text)
 
             try:
                 user = await interaction.client.fetch_user(self.target_id)
@@ -206,6 +211,8 @@ class BanReasonModal(discord.ui.Modal):
                 """,
                 interaction.guild_id, self.target_id, self.reason.value or None, interaction.user.id, expires_at,
             )
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "ban.team_added", "team", self.target_id, self.reason.value or until_text)
 
             managers = await get_team_managers(self.target_id)
             for m in managers:
@@ -307,6 +314,8 @@ class UnbanSelect(discord.ui.View):
             await pool.execute(
                 "DELETE FROM banned_users WHERE guild_id = $1 AND discord_id = $2", interaction.guild_id, target_id
             )
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "ban.user_removed", "user", target_id)
             try:
                 user = await interaction.client.fetch_user(target_id)
                 await user.send(f"✅ Du wurdest auf **{interaction.guild.name}** wieder entsperrt.")
@@ -322,6 +331,8 @@ class UnbanSelect(discord.ui.View):
             await pool.execute(
                 "DELETE FROM banned_teams WHERE guild_id = $1 AND team_id = $2", interaction.guild_id, target_id
             )
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "ban.team_removed", "team", target_id)
             team_name = self.team_names.get(target_id, f"Team {target_id}")
             managers = await get_team_managers(target_id)
             for m in managers:
@@ -338,9 +349,72 @@ class UnbanSelect(discord.ui.View):
             await interaction.followup.send(view=success_embed(f"{team_name} wurde entsperrt."), ephemeral=True)
 
 
+# ---------- Audit-Log ----------
+
+PAGE_SIZE = 15
+
+
+def _format_entry(e: dict) -> str:
+    label = ACTION_LABELS.get(e["action"], e["action"])
+    ts = int(e["created_at"].timestamp())
+    who = f"<@{e['actor_discord_id']}>" if e["actor_discord_id"] else "*System*"
+    line = f"<t:{ts}:R> · **{label}** · {who}"
+    if e["details"]:
+        line += f" — {e['details']}"
+    return line
+
+
+class AuditLogView(discord.ui.View):
+    def __init__(self, guild_id: int, offset: int = 0):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.offset = offset
+
+    async def render(self) -> discord.ui.LayoutView:
+        pool = get_pool()
+        entries = await pool.fetch(
+            "SELECT * FROM audit_log WHERE guild_id = $1 ORDER BY created_at DESC OFFSET $2 LIMIT $3",
+            self.guild_id, self.offset, PAGE_SIZE,
+        )
+        entries = [dict(e) for e in entries]
+
+        lines = "\n".join(_format_entry(e) for e in entries) if entries else "_Keine Einträge auf dieser Seite._"
+        text = f"# 📋 Audit-Log\n-# Einträge {self.offset + 1}–{self.offset + len(entries)}\n\n{lines}"
+
+        self.clear_items()
+        prev_btn = discord.ui.Button(label="⬅️ Neuer", style=discord.ButtonStyle.secondary, disabled=self.offset == 0)
+        next_btn = discord.ui.Button(label="Älter ➡️", style=discord.ButtonStyle.secondary, disabled=len(entries) < PAGE_SIZE)
+        prev_btn.callback = self._make_nav(-PAGE_SIZE)
+        next_btn.callback = self._make_nav(PAGE_SIZE)
+
+        view = discord.ui.LayoutView(timeout=180)
+        view.add_item(discord.ui.Container(
+            discord.ui.TextDisplay(text),
+            discord.ui.ActionRow(prev_btn, next_btn),
+            accent_color=discord.Color.gold(),
+        ))
+        return view
+
+    def _make_nav(self, delta: int):
+        async def callback(interaction: discord.Interaction):
+            self.offset = max(0, self.offset + delta)
+            new_view = await self.render()
+            await interaction.response.edit_message(view=new_view)
+        return callback
+
+
 class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @app_commands.command(name="audit_log", description="Zeigt das Audit-Log (wer hat wann was gemacht) - nur Admins")
+    async def audit_log(self, interaction: discord.Interaction):
+        if not await is_tournament_admin(interaction.user):
+            await interaction.response.send_message(view=error_embed("Nur Admins können das Audit-Log einsehen."), ephemeral=True)
+            return
+        pager = AuditLogView(interaction.guild_id)
+        view = await pager.render()
+        await interaction.response.send_message(view=view, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

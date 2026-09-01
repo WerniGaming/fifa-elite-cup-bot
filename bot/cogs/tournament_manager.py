@@ -2404,6 +2404,9 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
         tournament_id = row["id"]
         t = await get_tournament(tournament_id)
 
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "tournament.created", "tournament", tournament_id, self.name.value)
+
         try:
             from cogs.calendar import create_event_for_tournament, refresh_calendar
             await create_event_for_tournament(interaction.guild_id, tournament_id, self.name.value, start_time, interaction.user.id)
@@ -2869,6 +2872,12 @@ class TournamentCog(commands.Cog):
             await reconcile_signups(tournament_id)
             final = await get_team_signup(tournament_id, team["id"])
 
+            from audit import log_action
+            await log_action(
+                interaction.guild_id, interaction.user, "signup.registered", "tournament", tournament_id,
+                f"{team['name']} ({final['status'] if final else '?'})",
+            )
+
             if final and final["status"] == "registered":
                 await interaction.response.send_message(view=success_embed(f"{team['name']} ist angemeldet!"), ephemeral=True)
                 if t.get("is_donation_tournament"):
@@ -2903,6 +2912,8 @@ class TournamentCog(commands.Cog):
                 "UPDATE tournament_signups SET status = 'withdrawn' WHERE id = $1", existing["id"]
             )
             await reconcile_signups(tournament_id)
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "signup.withdrawn", "tournament", tournament_id, team["name"])
 
             await interaction.response.send_message(view=success_embed(f"👋 {team['name']} wurde abgemeldet."), ephemeral=True)
             await refresh_panel(self.bot, tournament_id)
@@ -2937,6 +2948,8 @@ class TournamentCog(commands.Cog):
                 await interaction.response.send_message(view=error_embed("Nur Admins können die Anmeldung schließen."), ephemeral=True)
                 return
             await pool.execute("UPDATE tournaments SET status = 'closed' WHERE id = $1", tournament_id)
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "tournament.closed", "tournament", tournament_id, t["name"])
             await interaction.response.send_message(
                 view=success_embed("🔒 Anmeldung geschlossen", "Nutze das Admin-Panel um das Bracket zu erstellen."), ephemeral=True
             )

@@ -484,6 +484,8 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             "INSERT INTO team_managers (team_id, discord_id, role) VALUES ($1, $2, 'owner')",
             team_id, interaction.user.id,
         )
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "team.created", "team", team_id, ea_club_name)
         await apply_team_nickname(interaction.user, ea_club_name)
         await _toggle_configured_role(interaction.guild, interaction.user, "vm_role_id", grant=True)
         if self.stream_link.value:
@@ -682,6 +684,8 @@ class LeaveConfirmView(discord.ui.View):
             # zuruecksetzen, nicht nur beim Owner der gerade klickt.
             managers = await get_team_managers(self.team["id"])
             await pool.execute("DELETE FROM teams WHERE id = $1", self.team["id"])
+            from audit import log_action
+            await log_action(interaction.guild_id, interaction.user, "team.deleted", "team", self.team["id"], self.team["name"])
             for m in managers:
                 member = interaction.guild.get_member(m["discord_id"])
                 if not member:

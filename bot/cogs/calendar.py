@@ -206,6 +206,8 @@ class EventCreateModal(discord.ui.Modal, title="Termin erstellen"):
             interaction.guild_id, self.title_input.value, self.event_type,
             self.beschreibung.value or None, start_time, interaction.user.id,
         )
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "calendar.event_created", "event", None, self.title_input.value)
         await refresh_calendar(interaction.client, interaction.guild)
         await interaction.followup.send(view=success_embed(f"Termin '{self.title_input.value}' angelegt."), ephemeral=True)
 
@@ -230,6 +232,8 @@ class EventDeleteSelect(discord.ui.View):
         event_id = int(interaction.data["values"][0])
         pool = get_pool()
         row = await pool.fetchrow("DELETE FROM calendar_events WHERE id = $1 RETURNING title", event_id)
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "calendar.event_deleted", "event", event_id, row["title"] if row else None)
         await refresh_calendar(interaction.client, interaction.guild)
         await interaction.response.edit_message(
             content=None, view=success_embed(f"Termin '{row['title'] if row else '?'}' gelöscht.")
@@ -251,6 +255,8 @@ class CalendarChannelSelectView(discord.ui.View):
             "ON CONFLICT (guild_id) DO UPDATE SET channel_id = $2, message_ids = '{}'",
             interaction.guild_id, channel_id,
         )
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "calendar.channel_set", "channel", channel_id)
         await interaction.response.edit_message(view=success_embed(f"Kalender-Kanal gesetzt", f"<#{channel_id}>"))
         await refresh_calendar(interaction.client, interaction.guild)
 
