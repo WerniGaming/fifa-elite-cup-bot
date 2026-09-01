@@ -24,8 +24,11 @@ from ui_helpers import success_embed, error_embed, info_embed
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 EVENT_TYPES = {
-    "cup": ("🏆", "Cup"),
-    "liga": ("⚽", "Liga"),
+    "cup": ("🏆", "FIFA Elite Cup"),
+    "cash_cup": ("💰", "FIFA Elite Cash Cup"),
+    "t_cup": ("🔥", "FIFA Elite T-Cup"),
+    "special_cup": ("👑", "FIFA Elite Spezial Cup"),
+    "league": ("⚽", "FIFA Elite League"),
     "sonstiges": ("📌", "Sonstiges"),
 }
 
@@ -139,8 +142,11 @@ class EventTypeSelectView(discord.ui.View):
     @discord.ui.select(
         placeholder="Terminart wählen...",
         options=[
-            discord.SelectOption(label="Cup", value="cup", emoji="🏆", description="Turnier/Cup (ohne Discord-Turnier-Verknüpfung)"),
-            discord.SelectOption(label="Liga", value="liga", emoji="⚽", description="Liga-Spieltag o.ä."),
+            discord.SelectOption(label="FIFA Elite Cup", value="cup", emoji="🏆"),
+            discord.SelectOption(label="FIFA Elite Cash Cup", value="cash_cup", emoji="💰"),
+            discord.SelectOption(label="FIFA Elite T-Cup", value="t_cup", emoji="🔥"),
+            discord.SelectOption(label="FIFA Elite Spezial Cup", value="special_cup", emoji="👑"),
+            discord.SelectOption(label="FIFA Elite League", value="league", emoji="⚽"),
             discord.SelectOption(label="Sonstiges", value="sonstiges", emoji="📌", description="Alles andere"),
         ],
     )
