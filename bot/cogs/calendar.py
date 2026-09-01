@@ -32,6 +32,15 @@ EVENT_TYPES = {
     "sonstiges": ("📌", "Sonstiges"),
 }
 
+EVENT_COLORS = {
+    "cup": discord.Color.gold(),
+    "cash_cup": discord.Color.green(),
+    "t_cup": discord.Color.orange(),
+    "special_cup": discord.Color.purple(),
+    "league": discord.Color.blue(),
+    "sonstiges": discord.Color.greyple(),
+}
+
 MONTH_NAMES_DE = [
     "Januar", "Februar", "März", "April", "Mai", "Juni",
     "Juli", "August", "September", "Oktober", "November", "Dezember",
@@ -89,41 +98,76 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
             pass
         return
 
-    # Nach Monat gruppieren, jede Gruppe eigener TextDisplay-Block
-    blocks: list[str] = []
+    pool_conn = pool
+    tournament_ids = [e["tournament_id"] for e in events if e["tournament_id"]]
+    tournament_channels: dict[int, tuple[int, int | None]] = {}
+    if tournament_ids:
+        t_rows = await pool_conn.fetch(
+            "SELECT id, channel_id, message_id FROM tournaments WHERE id = ANY($1::int[])", tournament_ids
+        )
+        tournament_channels = {r["id"]: (r["channel_id"], r["message_id"]) for r in t_rows}
+
+    header = discord.ui.Container(
+        discord.ui.TextDisplay(
+            "# 🗓️ FIFA Elite Eventkalender\n"
+            "-# Alle kommenden Cups, Ligen & Termine der FIFA Elite Organisation"
+        ),
+        accent_color=discord.Color.gold(),
+    )
+
+    # Monatsüberschrift als eigener schlichter Block, jeder Termin danach als eigener
+    # Block in der Farbe seiner Terminart (Cup=Gold, Cash Cup=Grün, T-Cup=Orange,
+    # Spezial Cup=Lila, League=Blau) - mit Anmelde-Button, falls ein Turnier verknüpft ist.
+    event_containers: list[discord.ui.Container] = []
     current_month = None
-    lines: list[str] = []
+
     for e in events:
         start_local = e["start_time"].astimezone(BERLIN_TZ)
         month_key = (start_local.year, start_local.month)
         if month_key != current_month:
-            if lines:
-                blocks.append("\n".join(lines))
             current_month = month_key
-            lines = [f"### {MONTH_NAMES_DE[start_local.month - 1]} {start_local.year}"]
+            event_containers.append(discord.ui.Container(
+                discord.ui.TextDisplay(f"## {MONTH_NAMES_DE[start_local.month - 1]} {start_local.year}"),
+                accent_color=discord.Color.dark_grey(),
+            ))
+
         emoji, label = EVENT_TYPES.get(e["event_type"], EVENT_TYPES["sonstiges"])
+        color = EVENT_COLORS.get(e["event_type"], discord.Color.gold())
         ts = int(e["start_time"].timestamp())
-        line = f"{emoji} **{e['title']}** — <t:{ts}:F> _({label})_"
+        text = f"### {emoji} {e['title']}\n<t:{ts}:F> · <t:{ts}:R>\n-# {label}"
         if e["description"]:
-            line += f"\n> {e['description']}"
-        lines.append(line)
-    if lines:
-        blocks.append("\n".join(lines))
+            text += f"\n> {e['description']}"
 
-    items = [discord.ui.TextDisplay(f"# 🗓️ Kalender\nKommende Cups, Ligen & Termine")]
-    for i, block in enumerate(blocks):
-        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-        items.append(discord.ui.TextDisplay(block))
-    items.append(discord.ui.Separator())
-    items.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R>"))
+        jump_url = None
+        if e["tournament_id"] and e["tournament_id"] in tournament_channels:
+            chan_id, msg_id = tournament_channels[e["tournament_id"]]
+            jump_url = f"https://discord.com/channels/{guild.id}/{chan_id}" + (f"/{msg_id}" if msg_id else "")
 
-    # Components V2 hat ein Zeichenlimit pro Nachricht - bei sehr vielen Terminen auf mehrere Nachrichten aufteilen
-    MAX_ITEMS_PER_MSG = 20
+        if jump_url:
+            content = discord.ui.Section(
+                discord.ui.TextDisplay(text),
+                accessory=discord.ui.Button(label="Zum Anmelde-Kanal", style=discord.ButtonStyle.link, url=jump_url),
+            )
+        else:
+            content = discord.ui.TextDisplay(text)
+
+        event_containers.append(discord.ui.Container(content, accent_color=color))
+
+    footer = discord.ui.Container(
+        discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R> · Termine können angepasst oder erweitert werden."),
+        accent_color=discord.Color.dark_grey(),
+    )
+
+    all_containers = [header, *event_containers, footer]
+
+    # Components V2: max. 40 Top-Level-Komponenten pro Nachricht - bei vielen Monaten auf mehrere Nachrichten aufteilen
+    MAX_CONTAINERS_PER_MSG = 8
     new_message_ids = []
-    for start in range(0, len(items), MAX_ITEMS_PER_MSG):
-        chunk = items[start:start + MAX_ITEMS_PER_MSG]
+    for start in range(0, len(all_containers), MAX_CONTAINERS_PER_MSG):
+        chunk = all_containers[start:start + MAX_CONTAINERS_PER_MSG]
         view = discord.ui.LayoutView(timeout=None)
-        view.add_item(discord.ui.Container(*chunk, accent_color=discord.Color.gold()))
+        for container in chunk:
+            view.add_item(container)
         try:
             msg = await channel.send(view=view)
             new_message_ids.append(msg.id)
