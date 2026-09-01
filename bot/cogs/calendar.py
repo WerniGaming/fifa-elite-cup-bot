@@ -249,11 +249,11 @@ class CalendarMenu(discord.ui.View):
     async def delete_event(self, interaction: discord.Interaction, button: discord.ui.Button):
         pool = get_pool()
         events = await pool.fetch(
-            "SELECT * FROM calendar_events WHERE guild_id = $1 AND start_time > now() ORDER BY start_time ASC",
+            "SELECT * FROM calendar_events WHERE guild_id = $1 ORDER BY start_time DESC LIMIT 25",
             interaction.guild_id,
         )
         if not events:
-            await interaction.response.send_message(view=info_embed("Keine kommenden Termine vorhanden."), ephemeral=True)
+            await interaction.response.send_message(view=info_embed("Keine Termine vorhanden."), ephemeral=True)
             return
         await interaction.response.send_message(
             content="Welchen Termin löschen?", view=EventDeleteSelect([dict(e) for e in events]), ephemeral=True
