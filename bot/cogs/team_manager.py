@@ -21,7 +21,7 @@ import asyncpg
 
 from db import get_pool
 from ea_api import EAProClubsAPI
-from ui_helpers import success_embed, error_embed, info_embed, warning_embed
+from ui_helpers import success_embed, error_embed, info_embed, warning_embed, WEBSITE_URL
 
 log = logging.getLogger("fifa-elite-cup")
 
@@ -307,6 +307,9 @@ async def refresh_team_overview(bot: commands.Bot, guild: discord.Guild):
                 blocks.append(discord.ui.Separator())
         if idx == len(chunks) - 1:
             blocks.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+            blocks.append(discord.ui.ActionRow(
+                discord.ui.Button(label="🌐 Alle Teams auf der Website", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/teams"),
+            ))
             blocks.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R>"))
 
         view = discord.ui.LayoutView(timeout=None)

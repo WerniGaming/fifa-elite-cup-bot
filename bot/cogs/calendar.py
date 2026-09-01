@@ -19,7 +19,7 @@ from discord.ext import commands, tasks
 
 from db import get_pool
 from permissions import is_tournament_admin
-from ui_helpers import success_embed, error_embed, info_embed
+from ui_helpers import success_embed, error_embed, info_embed, WEBSITE_URL
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
@@ -135,6 +135,9 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
             items.append(discord.ui.TextDisplay(text))
 
     items.append(discord.ui.Separator())
+    items.append(discord.ui.ActionRow(
+        discord.ui.Button(label="🌐 Kalender auf der Website", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/kalender"),
+    ))
     items.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R> · Termine können angepasst oder erweitert werden."))
 
     # Components V2: max. 40 Top-Level-Komponenten pro Nachricht - bei sehr vielen Terminen auf mehrere Nachrichten aufteilen

@@ -18,7 +18,7 @@ import discord
 from discord.ext import commands
 
 from db import get_pool
-from ui_helpers import success_embed
+from ui_helpers import success_embed, WEBSITE_URL
 from ea_api import EAProClubsAPI
 from cogs.tournament_manager import (
     get_tournament,
@@ -407,6 +407,9 @@ def build_stat_image_view(title_text: str, file_obj: discord.File, body_text: st
         items.append(discord.ui.Separator())
         items.append(discord.ui.TextDisplay(body_text))
     items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=file_obj)))
+    items.append(discord.ui.ActionRow(
+        discord.ui.Button(label="🌐 Mehr Statistiken auf der Website", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/stats"),
+    ))
     view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
     return view
 

@@ -15,6 +15,10 @@ RED = discord.Color.red()
 GREEN = discord.Color.green()
 ORANGE = discord.Color.orange()
 
+# Zentral definiert, damit die Website ueberall im Bot einheitlich verlinkt wird
+# (Turnier-Panel, Team-Uebersicht, Admin-Panel, Willkommens-Nachricht, ...).
+WEBSITE_URL = "https://fifaelite.de"
+
 
 def _build(icon: str, title: str, detail: str | None, color: discord.Color) -> discord.ui.LayoutView:
     text = f"### {icon} {title}"

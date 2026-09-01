@@ -19,7 +19,7 @@ from discord.ext import commands
 import asyncpg
 
 from db import get_pool
-from ui_helpers import info_embed, success_embed, error_embed, warning_embed
+from ui_helpers import info_embed, success_embed, error_embed, warning_embed, WEBSITE_URL
 from cogs.tournament_manager import (
     TournamentCreateModal,
     get_tournament,
@@ -1240,6 +1240,9 @@ class AdminPanel(discord.ui.LayoutView):
                 discord.ui.Button(label="Kommunikation", style=discord.ButtonStyle.secondary, custom_id="admincat:communication"),
                 discord.ui.Button(label="System", style=discord.ButtonStyle.secondary, custom_id="admincat:system"),
                 discord.ui.Button(label="Kalender", style=discord.ButtonStyle.secondary, custom_id="admincat:calendar"),
+            ),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="🌐 Admin-Dashboard (Website)", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/dashboard"),
             ),
             accent_color=discord.Color.gold(),
         )

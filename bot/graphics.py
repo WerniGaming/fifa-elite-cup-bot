@@ -49,8 +49,11 @@ def _paste_logo(img: Image.Image, logo: Image.Image | None, box):
 
 
 GOLD = (255, 215, 80)
-DARK_BG = (16, 18, 24)
-CARD_BG = (28, 31, 40)
+# Auf das Website-Redesign abgestimmt (echtes Schwarz statt Blaugrau, gleiche
+# Card-/Border-Farbwerte wie app/globals.css --background/--card/--card-border).
+DARK_BG = (0, 0, 0)
+CARD_BG = (19, 19, 19)
+CARD_BORDER = (38, 38, 38)
 WHITE = (235, 235, 240)
 GREY = (150, 150, 160)
 PITCH_GREEN = (24, 92, 48)
@@ -84,7 +87,7 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
     async with aiohttp.ClientSession() as session:
         y = 150
         for award_name, player_name, team_name, stat_text, logo_url in awards:
-            draw.rounded_rectangle([(40, y), (width - 40, y + row_h - 20)], radius=14, fill=CARD_BG)
+            draw.rounded_rectangle([(40, y), (width - 40, y + row_h - 20)], radius=14, fill=CARD_BG, outline=CARD_BORDER, width=1)
             logo = await _fetch_logo(session, logo_url, team_name)
             _paste_logo(img, logo, (55, y + 15, 55 + (row_h - 50), y + row_h - 35))
             text_x = 55 + (row_h - 50) + 20
@@ -304,7 +307,7 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
             y += section_header_h
             for m in matches:
                 row_bottom = y + row_h - 12
-                draw.rounded_rectangle([(26, y), (width - 26, row_bottom)], radius=12, fill=CARD_BG)
+                draw.rounded_rectangle([(26, y), (width - 26, row_bottom)], radius=12, fill=CARD_BG, outline=CARD_BORDER, width=1)
                 cy = (y + row_bottom) // 2
 
                 logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])

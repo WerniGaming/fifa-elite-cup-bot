@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from db import get_pool
-from ui_helpers import success_embed, error_embed, info_embed, warning_embed
+from ui_helpers import success_embed, error_embed, info_embed, warning_embed, WEBSITE_URL
 from permissions import is_tournament_admin, is_tournament_moderator
 from typing import Literal
 from cogs.team_manager import get_team_for_user, get_role_for_user, get_team_managers, is_valid_twitch_link
@@ -2278,6 +2278,14 @@ class TournamentPanel(discord.ui.LayoutView):
                     ),
                 )
             )
+        items.append(
+            discord.ui.ActionRow(
+                discord.ui.Button(
+                    label="🌐 Auf der Website ansehen", style=discord.ButtonStyle.link,
+                    url=f"{WEBSITE_URL}/turniere/{t['id']}",
+                ),
+            )
+        )
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
         items.append(explanation)
         container = discord.ui.Container(*items, accent_color=discord.Color.gold())

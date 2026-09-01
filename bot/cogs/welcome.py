@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from permissions import is_tournament_admin
-from ui_helpers import error_embed, success_embed
+from ui_helpers import error_embed, success_embed, WEBSITE_URL
 
 BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "welcome_banner.jpg")
 
@@ -48,6 +48,9 @@ class WelcomePanel(discord.ui.LayoutView):
             "> Entscheidungen der Turnierleitung sind final\n"
             "-# FIFA Elite Cup"
         )
+        website_row = discord.ui.ActionRow(
+            discord.ui.Button(label="🌐 Zur Website", style=discord.ButtonStyle.link, url=WEBSITE_URL),
+        )
 
         media_items = []
         if os.path.exists(BANNER_PATH):
@@ -65,6 +68,8 @@ class WelcomePanel(discord.ui.LayoutView):
             stats_block,
             discord.ui.Separator(),
             rules_block,
+            discord.ui.Separator(),
+            website_row,
             accent_color=discord.Color.gold(),
         )
         self.add_item(container)
