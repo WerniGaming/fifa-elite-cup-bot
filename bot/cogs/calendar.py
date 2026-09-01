@@ -32,15 +32,6 @@ EVENT_TYPES = {
     "sonstiges": ("📌", "Sonstiges"),
 }
 
-EVENT_COLORS = {
-    "cup": discord.Color.gold(),
-    "cash_cup": discord.Color.green(),
-    "t_cup": discord.Color.orange(),
-    "special_cup": discord.Color.purple(),
-    "league": discord.Color.blue(),
-    "sonstiges": discord.Color.greyple(),
-}
-
 MONTH_NAMES_DE = [
     "Januar", "Februar", "März", "April", "Mai", "Juni",
     "Juli", "August", "September", "Oktober", "November", "Dezember",
@@ -107,32 +98,24 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
         )
         tournament_channels = {r["id"]: (r["channel_id"], r["message_id"]) for r in t_rows}
 
-    header = discord.ui.Container(
-        discord.ui.TextDisplay(
-            "# 🗓️ FIFA Elite Eventkalender\n"
-            "-# Alle kommenden Cups, Ligen & Termine der FIFA Elite Organisation"
-        ),
-        accent_color=discord.Color.gold(),
-    )
-
-    # Monatsüberschrift als eigener schlichter Block, jeder Termin danach als eigener
-    # Block in der Farbe seiner Terminart (Cup=Gold, Cash Cup=Grün, T-Cup=Orange,
-    # Spezial Cup=Lila, League=Blau) - mit Anmelde-Button, falls ein Turnier verknüpft ist.
-    event_containers: list[discord.ui.Container] = []
+    # Alles in EINEM durchgehenden Block: Monatsüberschriften und Termine als
+    # TextDisplay/Section-Zeilen mit Separatoren dazwischen, statt vieler einzelner
+    # Container (die sehen als separate Karten aus wie eigene Nachrichten).
+    items: list = [discord.ui.TextDisplay(
+        "# 🗓️ FIFA Elite Eventkalender\n"
+        "-# Alle kommenden Cups, Ligen & Termine der FIFA Elite Organisation"
+    )]
     current_month = None
 
     for e in events:
         start_local = e["start_time"].astimezone(BERLIN_TZ)
         month_key = (start_local.year, start_local.month)
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large if month_key != current_month else discord.SeparatorSpacing.small))
         if month_key != current_month:
             current_month = month_key
-            event_containers.append(discord.ui.Container(
-                discord.ui.TextDisplay(f"## {MONTH_NAMES_DE[start_local.month - 1]} {start_local.year}"),
-                accent_color=discord.Color.dark_grey(),
-            ))
+            items.append(discord.ui.TextDisplay(f"## {MONTH_NAMES_DE[start_local.month - 1]} {start_local.year}"))
 
         emoji, label = EVENT_TYPES.get(e["event_type"], EVENT_TYPES["sonstiges"])
-        color = EVENT_COLORS.get(e["event_type"], discord.Color.gold())
         ts = int(e["start_time"].timestamp())
         text = f"### {emoji} {e['title']}\n<t:{ts}:F> · <t:{ts}:R>\n-# {label}"
         if e["description"]:
@@ -144,30 +127,23 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
             jump_url = f"https://discord.com/channels/{guild.id}/{chan_id}" + (f"/{msg_id}" if msg_id else "")
 
         if jump_url:
-            content = discord.ui.Section(
+            items.append(discord.ui.Section(
                 discord.ui.TextDisplay(text),
                 accessory=discord.ui.Button(label="Zum Anmelde-Kanal", style=discord.ButtonStyle.link, url=jump_url),
-            )
+            ))
         else:
-            content = discord.ui.TextDisplay(text)
+            items.append(discord.ui.TextDisplay(text))
 
-        event_containers.append(discord.ui.Container(content, accent_color=color))
+    items.append(discord.ui.Separator())
+    items.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R> · Termine können angepasst oder erweitert werden."))
 
-    footer = discord.ui.Container(
-        discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R> · Termine können angepasst oder erweitert werden."),
-        accent_color=discord.Color.dark_grey(),
-    )
-
-    all_containers = [header, *event_containers, footer]
-
-    # Components V2: max. 40 Top-Level-Komponenten pro Nachricht - bei vielen Monaten auf mehrere Nachrichten aufteilen
-    MAX_CONTAINERS_PER_MSG = 8
+    # Components V2: max. 40 Top-Level-Komponenten pro Nachricht - bei sehr vielen Terminen auf mehrere Nachrichten aufteilen
+    MAX_ITEMS_PER_MSG = 35
     new_message_ids = []
-    for start in range(0, len(all_containers), MAX_CONTAINERS_PER_MSG):
-        chunk = all_containers[start:start + MAX_CONTAINERS_PER_MSG]
+    for start in range(0, len(items), MAX_ITEMS_PER_MSG):
+        chunk = items[start:start + MAX_ITEMS_PER_MSG]
         view = discord.ui.LayoutView(timeout=None)
-        for container in chunk:
-            view.add_item(container)
+        view.add_item(discord.ui.Container(*chunk, accent_color=discord.Color.gold()))
         try:
             msg = await channel.send(view=view)
             new_message_ids.append(msg.id)
