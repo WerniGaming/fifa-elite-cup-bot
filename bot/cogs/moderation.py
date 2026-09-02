@@ -430,8 +430,8 @@ class ModerationCog(commands.Cog):
         )
         if not row or not row["player_search_channel_id"] or message.channel.id != row["player_search_channel_id"]:
             return
-        if message.author.guild_permissions.administrator or message.author.guild_permissions.manage_messages:
-            return
+        # TESTWEISE ohne Admin/Mod-Ausnahme - auf Owner-Wunsch, um die Regel selbst
+        # testen zu koennen. Bei Bedarf wieder zurueckbauen (siehe Git-Historie).
 
         team = await get_team_for_user(message.guild.id, message.author.id)
         if team is not None:
