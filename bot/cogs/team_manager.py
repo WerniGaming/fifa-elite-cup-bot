@@ -534,6 +534,43 @@ class EditFieldModal(discord.ui.Modal):
             await refresh_team_overview(interaction.client, interaction.guild)
 
 
+class TeamRenameModal(discord.ui.Modal, title="Team umbenennen"):
+    def __init__(self, team_id: int, current_name: str):
+        super().__init__()
+        self.team_id = team_id
+        self.name_input = discord.ui.TextInput(label="Neuer Team-Name", default=current_name, max_length=60)
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_name = self.name_input.value.strip()
+        if not new_name:
+            await interaction.response.send_message(view=error_embed("Der Team-Name darf nicht leer sein."), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        pool = get_pool()
+        try:
+            await pool.execute("UPDATE teams SET name = $1 WHERE id = $2", new_name, self.team_id)
+        except asyncpg.UniqueViolationError:
+            await interaction.followup.send(
+                view=error_embed(f'Ein Team namens "{new_name}" existiert auf diesem Server bereits.'), ephemeral=True
+            )
+            return
+
+        from audit import log_action
+        await log_action(interaction.guild_id, interaction.user, "team.renamed", "team", self.team_id, new_name)
+
+        # Nicknames aller Manager auf den neuen Namen umstellen (bestehendes Format "Team | User")
+        managers = await get_team_managers(self.team_id)
+        for m in managers:
+            member = interaction.guild.get_member(m["discord_id"])
+            if member:
+                await apply_team_nickname(member, new_name)
+
+        await refresh_team_overview(interaction.client, interaction.guild)
+        await interaction.followup.send(view=success_embed(f'Team umbenannt in "{new_name}".'), ephemeral=True)
+
+
 # ---------- Ephemere Untermenüs ----------
 
 class EAClubModal(discord.ui.Modal, title="EA Club verknüpfen"):
@@ -768,6 +805,7 @@ class TeamManagerPanel(discord.ui.LayoutView):
             ),
             discord.ui.ActionRow(
                 discord.ui.Button(label="Benachrichtigungen", style=discord.ButtonStyle.secondary, custom_id="team:notifications"),
+                discord.ui.Button(label="Umbenennen", style=discord.ButtonStyle.secondary, custom_id="team:rename"),
             ),
             accent_color=discord.Color.gold(),
         )
@@ -1061,6 +1099,13 @@ class TeamManagerCog(commands.Cog):
                 await interaction.response.send_message(view=error_embed("Nur der Vereinsmanager kann Co-Manager verwalten."), ephemeral=True)
                 return
             await interaction.response.send_message(content="Co-Manager verwalten:", view=CoManagerView(team), ephemeral=True)
+
+        elif action == "rename":
+            role = await get_role_for_user(team["id"], interaction.user.id)
+            if role != "owner":
+                await interaction.response.send_message(view=error_embed("Nur der Vereinsmanager kann das Team umbenennen."), ephemeral=True)
+                return
+            await interaction.response.send_modal(TeamRenameModal(team["id"], team["name"]))
 
         elif action == "notifications":
             await interaction.response.send_message(

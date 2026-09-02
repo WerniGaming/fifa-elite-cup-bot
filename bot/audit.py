@@ -30,6 +30,7 @@ ACTION_LABELS: dict[str, str] = {
     "team.created": "Team erstellt",
     "team.deleted": "Team gelöscht",
     "team.logo_updated": "Team-Logo aktualisiert",
+    "team.renamed": "Team umbenannt",
     "tournament.created": "Turnier erstellt",
     "tournament.closed": "Anmeldung geschlossen",
     "tournament.deleted": "Turnier gelöscht",
