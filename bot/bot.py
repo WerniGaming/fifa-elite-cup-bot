@@ -26,6 +26,9 @@ INITIAL_COGS = [
     "cogs.admin_panel",
     "cogs.calendar",
     "cogs.public_commands",
+    "cogs.rules",
+    "cogs.feedback",
+    "cogs.friendlies",
 ]
 
 

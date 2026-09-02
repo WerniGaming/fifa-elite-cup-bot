@@ -280,6 +280,7 @@ class AdminSystemMenu(discord.ui.View):
         self.add_item(discord.ui.Button(label="Live-Log-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setauditchannel"))
         self.add_item(discord.ui.Button(label="Live-Ergebnis-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setresultschannel"))
         self.add_item(discord.ui.Button(label="Spieler-Suche-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setplayersearchchannel"))
+        self.add_item(discord.ui.Button(label="Medien-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setmediachannel"))
 
 
 class AuditChannelSelectView(discord.ui.View):
@@ -340,6 +341,27 @@ class PlayerSearchChannelSelectView(discord.ui.View):
         await interaction.response.edit_message(
             content=None,
             view=success_embed("Spieler-Suche-Kanal gesetzt", f"<#{channel_id}> — nur noch Vereinsmanager dürfen dort schreiben."),
+        )
+
+
+class MediaChannelSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        select = discord.ui.ChannelSelect(placeholder="Medien-Kanal wählen...", channel_types=[discord.ChannelType.text])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, media_only_channel_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET media_only_channel_id = $2",
+            interaction.guild_id, channel_id,
+        )
+        await interaction.response.edit_message(
+            content=None,
+            view=success_embed("Medien-Kanal gesetzt", f"<#{channel_id}> — dort ist ab jetzt nur noch Text verboten, Bilder/Videos bleiben erlaubt."),
         )
 
 
@@ -1437,6 +1459,16 @@ class AdminPanelCog(commands.Cog):
             await interaction.response.send_message(
                 content=f"**Live-Ergebnis-Kanal einstellen**\nAktuell: {current}\nJedes fertig gespielte Match wird sofort hier gepostet.",
                 view=ResultsChannelSelectView(),
+                ephemeral=True,
+            )
+
+        elif action == "setmediachannel":
+            pool = get_pool()
+            row = await pool.fetchrow("SELECT media_only_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            current = f"<#{row['media_only_channel_id']}>" if row and row["media_only_channel_id"] else "keiner gesetzt"
+            await interaction.response.send_message(
+                content=f"**Medien-Kanal einstellen**\nAktuell: {current}\nIn diesem Kanal sind nur Bilder/Videos erlaubt - jede Nachricht mit Text wird automatisch gelöscht.",
+                view=MediaChannelSelectView(),
                 ephemeral=True,
             )
 
