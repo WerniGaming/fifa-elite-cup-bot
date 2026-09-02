@@ -34,11 +34,53 @@ async def _fetch_logo(session: aiohttp.ClientSession, url: str | None, label: st
         return None
 
 
-def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = True):
+def _team_initials(name: str) -> str:
+    """Leitet 1-2 Grossbuchstaben aus einem Teamnamen ab (erste Buchstaben der ersten
+    beiden Woerter, bei nur einem Wort dessen erste zwei Zeichen) - fuer den
+    Initialen-Platzhalter bei Teams ohne Logo."""
+    words = [w for w in name.strip().split() if w]
+    letters = "".join(w[0] for w in words[:2]).upper()
+    if not letters:
+        return ""
+    if len(letters) == 1:
+        letters = name.strip()[:2].upper()
+    return letters
+
+
+def _draw_logo_placeholder(img: Image.Image, box, label: str = "", ring: bool = True, ring_color=(140, 115, 40)):
+    """Platzhalter fuer Teams ohne Logo: goldbrauner Kreis mit den Team-Initialen
+    statt eines leeren, toten Kreis-Umrisses."""
+    x1, y1, x2, y2 = (int(v) for v in box)
+    w, h = x2 - x1, y2 - y1
+    draw = ImageDraw.Draw(img)
+    _gradient_rounded_rect(img, (x1, y1, x2, y2), radius=max(w, h), color_top=(46, 38, 16), color_bottom=(24, 20, 8))
+    draw = ImageDraw.Draw(img)
+    initials = _team_initials(label)
+    if initials:
+        size = max(11, int(h * 0.42))
+        font = _font(size)
+        while size > 10:
+            bbox = draw.textbbox((0, 0), initials, font=font)
+            if bbox[2] - bbox[0] <= w * 0.7:
+                break
+            size -= 2
+            font = _font(size)
+        bbox = draw.textbbox((0, 0), initials, font=font)
+        tx = x1 + w / 2 - (bbox[2] - bbox[0]) / 2 - bbox[0]
+        ty = y1 + h / 2 - (bbox[3] - bbox[1]) / 2 - bbox[1]
+        draw.text((tx, ty), initials, font=font, fill=GOLD)
+    if ring:
+        draw.ellipse([(x1, y1), (x2 - 1, y2 - 1)], outline=ring_color, width=2)
+
+
+def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = True, label: str = "", ring_color=(140, 115, 40)):
     """Fuegt ein Logo rund zugeschnitten ein (wie TeamLogo.tsx auf der Website:
     rounded-full object-cover), mit dezentem goldenen Ring drumherum - sorgt fuer
-    einen einheitlichen Look statt eines eckigen Bilds hinter einem Kreis-Umriss."""
+    einen einheitlichen Look statt eines eckigen Bilds hinter einem Kreis-Umriss.
+    Ohne Logo wird stattdessen ein Initialen-Platzhalter gezeichnet (siehe
+    _draw_logo_placeholder)."""
     if logo is None:
+        _draw_logo_placeholder(img, box, label, ring, ring_color)
         return
     x1, y1, x2, y2 = (int(v) for v in box)
     w, h = x2 - x1, y2 - y1
@@ -65,7 +107,7 @@ def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = Tr
     img.paste(logo_copy, (lx, ly), mask)
     if ring:
         draw = ImageDraw.Draw(img)
-        draw.ellipse([(lx - 1, ly - 1), (lx + size, ly + size)], outline=(140, 115, 40), width=2)
+        draw.ellipse([(lx - 1, ly - 1), (lx + size, ly + size)], outline=ring_color, width=2)
 
 
 def _gradient_rounded_rect(img: Image.Image, box, radius: int, color_top: tuple[int, int, int], color_bottom: tuple[int, int, int]):
@@ -192,7 +234,7 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
         for award_name, player_name, team_name, stat_text, logo_url in awards:
             draw.rounded_rectangle([(40, y), (width - 40, y + row_h - 20)], radius=14, fill=CARD_BG, outline=CARD_BORDER, width=1)
             logo = await _fetch_logo(session, logo_url, team_name)
-            _paste_logo(img, logo, (55, y + 15, 55 + (row_h - 50), y + row_h - 35))
+            _paste_logo(img, logo, (55, y + 15, 55 + (row_h - 50), y + row_h - 35), label=team_name)
             text_x = 55 + (row_h - 50) + 20
             draw.text((text_x, y + 12), award_name, font=_font(20), fill=GOLD)
             draw.text((text_x, y + 40), player_name, font=_font(30), fill=WHITE)
@@ -348,13 +390,7 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                 draw = ImageDraw.Draw(img)
 
                 logo = await _fetch_logo(session, logo_url, team_name)
-                if logo:
-                    _paste_logo(img, logo, (cx - logo_size // 2, cy - logo_size // 2, cx + logo_size // 2, cy + logo_size // 2))
-                else:
-                    draw.ellipse(
-                        [(cx - logo_size // 2, cy - logo_size // 2), (cx + logo_size // 2, cy + logo_size // 2)],
-                        fill=CARD_BG, outline=GOLD, width=2,
-                    )
+                _paste_logo(img, logo, (cx - logo_size // 2, cy - logo_size // 2, cx + logo_size // 2, cy + logo_size // 2), label=team_name)
 
                 # Positions-Badge (z.B. LM/RIV/ZOM) oben rechts am Logo
                 group_labels = pos_labels.get(group, [])
@@ -436,13 +472,7 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
 
             logo = await _fetch_logo(session, logo_url, team_name)
             logo_top = bowl_top - logo_size - 18
-            if logo:
-                _paste_logo(img, logo, (cx - logo_size // 2, logo_top, cx + logo_size // 2, logo_top + logo_size))
-            else:
-                draw.ellipse(
-                    [(cx - logo_size // 2, logo_top), (cx + logo_size // 2, logo_top + logo_size)],
-                    fill=CARD_BG, outline=color, width=3,
-                )
+            _paste_logo(img, logo, (cx - logo_size // 2, logo_top, cx + logo_size // 2, logo_top + logo_size), label=team_name, ring_color=color)
 
             name_font = _font(24)
             name = team_name[:20]
@@ -469,10 +499,7 @@ async def render_club_stats_card(
     logo_size = 110
     async with aiohttp.ClientSession() as session:
         logo = await _fetch_logo(session, logo_url, team_name)
-    if logo:
-        _paste_logo(img, logo, (36, 36, 36 + logo_size, 36 + logo_size))
-    else:
-        draw.ellipse([(36, 36), (36 + logo_size, 36 + logo_size)], fill=CARD_BG, outline=GOLD, width=2)
+    _paste_logo(img, logo, (36, 36, 36 + logo_size, 36 + logo_size), label=team_name)
 
     text_x = 36 + logo_size + 28
     draw.text((text_x, 34), team_name, font=_font(38), fill=WHITE)
@@ -593,8 +620,8 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
         logo_s = 26
         l1 = await _fetch_logo(session, m.get("team1_logo_url"), m.get("team1_name", ""))
         l2 = await _fetch_logo(session, m.get("team2_logo_url"), m.get("team2_name", ""))
-        _paste_logo(img, l1, (x + 12, top + 10, x + 12 + logo_s, top + 10 + logo_s), ring=False)
-        _paste_logo(img, l2, (x + 12, top + card_h - 10 - logo_s, x + 12 + logo_s, top + card_h - 10), ring=False)
+        _paste_logo(img, l1, (x + 12, top + 10, x + 12 + logo_s, top + 10 + logo_s), ring=False, label=m.get("team1_name") or "")
+        _paste_logo(img, l2, (x + 12, top + card_h - 10 - logo_s, x + 12 + logo_s, top + card_h - 10), ring=False, label=m.get("team2_name") or "")
 
         name1 = (m.get("team1_name") or "Freilos")[:18]
         name2 = (m.get("team2_name") or "Freilos")[:18]
@@ -681,12 +708,12 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
                 cy = (y + row_bottom) // 2
 
                 logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])
-                _paste_logo(img, logo1, (44, cy - logo_size // 2, 44 + logo_size, cy + logo_size // 2))
+                _paste_logo(img, logo1, (44, cy - logo_size // 2, 44 + logo_size, cy + logo_size // 2), label=m["team1_name"])
                 t1_name = m["team1_name"][:22]
                 draw.text((44 + logo_size + 16, cy - 12), t1_name, font=name_font, fill=WHITE)
 
                 logo2 = await _fetch_logo(session, m.get("team2_logo_url"), m["team2_name"])
-                _paste_logo(img, logo2, (width - 44 - logo_size, cy - logo_size // 2, width - 44, cy + logo_size // 2))
+                _paste_logo(img, logo2, (width - 44 - logo_size, cy - logo_size // 2, width - 44, cy + logo_size // 2), label=m["team2_name"])
                 t2_name = m["team2_name"][:22]
                 t2w, _ = _text_size(draw, t2_name, name_font)
                 draw.text((width - 44 - logo_size - 16 - t2w, cy - 12), t2_name, font=name_font, fill=WHITE)
