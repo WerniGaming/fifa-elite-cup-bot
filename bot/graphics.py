@@ -35,22 +35,37 @@ async def _fetch_logo(session: aiohttp.ClientSession, url: str | None, label: st
 
 
 def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = True):
-    """Fuegt ein Logo ein, mit dezentem goldenen Ring drumherum (wie TeamLogo.tsx auf der
-    Website: border border-gold-dim) - sorgt fuer einen einheitlichen Look."""
+    """Fuegt ein Logo rund zugeschnitten ein (wie TeamLogo.tsx auf der Website:
+    rounded-full object-cover), mit dezentem goldenen Ring drumherum - sorgt fuer
+    einen einheitlichen Look statt eines eckigen Bilds hinter einem Kreis-Umriss."""
     if logo is None:
         return
     x1, y1, x2, y2 = (int(v) for v in box)
     w, h = x2 - x1, y2 - y1
     pad = 6
     target_w, target_h = w - pad * 2, h - pad * 2
-    logo_copy = logo.copy()
-    logo_copy.thumbnail((target_w, target_h), Image.LANCZOS)
-    lx = x1 + pad + (target_w - logo_copy.width) // 2
-    ly = y1 + pad + (target_h - logo_copy.height) // 2
-    img.paste(logo_copy, (lx, ly), logo_copy)
+    # Erst quadratisch zuschneiden (object-cover-Verhalten), dann auf Zielgroesse
+    # skalieren - so wird der volle Kreis mit Bildinhalt gefuellt statt nur ein
+    # kleineres thumbnail() mittig auf einen groesseren Kreis zu setzen.
+    lw, lh = logo.size
+    side = min(lw, lh)
+    cx0, cy0 = (lw - side) // 2, (lh - side) // 2
+    logo_copy = logo.crop((cx0, cy0, cx0 + side, cy0 + side)).convert("RGBA")
+    size = min(target_w, target_h)
+    logo_copy = logo_copy.resize((size, size), Image.LANCZOS)
+    # Runde Alpha-Maske, damit das Logo wirklich als Kreis erscheint statt als
+    # eckiges Bild innerhalb eines nur aufgezeichneten Ring-Umrisses.
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse([(0, 0), (size - 1, size - 1)], fill=255)
+    if logo_copy.mode == "RGBA":
+        alpha = logo_copy.split()[3]
+        mask = Image.composite(mask, Image.new("L", (size, size), 0), alpha)
+    lx = x1 + pad + (target_w - size) // 2
+    ly = y1 + pad + (target_h - size) // 2
+    img.paste(logo_copy, (lx, ly), mask)
     if ring:
         draw = ImageDraw.Draw(img)
-        draw.ellipse([(x1, y1), (x2, y2)], outline=(140, 115, 40), width=2)
+        draw.ellipse([(lx - 1, ly - 1), (lx + size, ly + size)], outline=(140, 115, 40), width=2)
 
 
 def _gradient_rounded_rect(img: Image.Image, box, radius: int, color_top: tuple[int, int, int], color_bottom: tuple[int, int, int]):
@@ -202,27 +217,51 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     Einfaches generisches Fußballfeld-Layout (3-5-2), kein Template vorhanden.
     formation_slots: {"GK": [(player_name, team_name, logo_url)], "DEF": [...], "MID": [...], "FWD": [...]}
     """
-    width, height = 1000, 1300
+    width, height = 1150, 1480
     img = Image.new("RGB", (width, height), PITCH_GREEN)
     draw = ImageDraw.Draw(img)
 
-    header_h = 110
+    header_h = 120
     draw.rectangle([(0, 0), (width, header_h)], fill=DARK_BG)
-    _glow(img, (width - 120, 30), 160, alpha=60)
+    _glow(img, (width - 140, 32), 180, alpha=60)
     draw = ImageDraw.Draw(img)
-    draw.text((40, 20), title, font=_font(38), fill=GOLD)
-    draw.text((40, 66), subtitle, font=_font(20), fill=GREY)
+    draw.text((44, 22), title, font=_font(42), fill=GOLD)
+    draw.text((44, 72), subtitle, font=_font(22), fill=GREY)
 
     pitch_top = header_h + 20
     draw.rectangle([(20, pitch_top), (width - 20, height - 20)], outline=PITCH_LINE, width=4)
     mid_y = pitch_top + (height - 20 - pitch_top) // 2
     draw.line([(20, mid_y), (width - 20, mid_y)], fill=PITCH_LINE, width=3)
-    draw.ellipse([(width / 2 - 90, mid_y - 90), (width / 2 + 90, mid_y + 90)], outline=PITCH_LINE, width=3)
-    draw.rectangle([(width / 2 - 180, height - 20 - 140), (width / 2 + 180, height - 20)], outline=PITCH_LINE, width=3)
+    draw.ellipse([(width / 2 - 100, mid_y - 100), (width / 2 + 100, mid_y + 100)], outline=PITCH_LINE, width=3)
+    draw.rectangle([(width / 2 - 200, height - 20 - 155), (width / 2 + 200, height - 20)], outline=PITCH_LINE, width=3)
 
-    logo_size = 70
+    logo_size = 82
+
+    def _fit_name(name: str, max_w: int) -> tuple[str, "ImageFont.FreeTypeFont", int]:
+        """Waehlt die groesstmoegliche Schriftgroesse (mit Untergrenze), die noch
+        in max_w passt, und kuerzt den Namen als letzten Ausweg - verhindert, dass
+        sich Label benachbarter Spieler bei langen Namen ueberlappen."""
+        for size in (26, 24, 22, 20, 18, 16, 15, 14):
+            f = _font(size)
+            tw, _ = _text_size(draw, name, f)
+            if tw <= max_w:
+                return name, f, tw
+        f = _font(14)
+        truncated = name
+        while len(truncated) > 3:
+            truncated = truncated[:-1]
+            candidate = truncated.rstrip() + "…"
+            tw, _ = _text_size(draw, candidate, f)
+            if tw <= max_w:
+                return candidate, f, tw
+        return truncated, f, _text_size(draw, truncated, f)[0]
+
     async with aiohttp.ClientSession() as session:
         for group, slots in TOP11_LAYOUT.items():
+            xs = sorted(fx for fx, _ in slots)
+            min_gap_px = min((xs[i + 1] - xs[i]) * width for i in range(len(xs) - 1)) if len(xs) > 1 else width * 0.9
+            max_label_w = int(min_gap_px - 24)
+
             players = formation_slots.get(group, [])
             for i, (fx, fy) in enumerate(slots):
                 if i >= len(players):
@@ -240,13 +279,12 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                         fill=CARD_BG, outline=GOLD, width=2,
                     )
 
-                name_font = _font(22)
-                tw, _ = _text_size(draw, player_name, name_font)
-                label_y = cy + logo_size // 2 + 8
+                label_text, name_font, tw = _fit_name(player_name, max_label_w)
+                label_y = cy + logo_size // 2 + 10
                 draw.rounded_rectangle(
-                    [(cx - tw / 2 - 10, label_y), (cx + tw / 2 + 10, label_y + 30)], radius=6, fill=DARK_BG
+                    [(cx - tw / 2 - 10, label_y), (cx + tw / 2 + 10, label_y + 34)], radius=6, fill=DARK_BG
                 )
-                draw.text((cx - tw / 2, label_y + 4), player_name, font=name_font, fill=WHITE)
+                draw.text((cx - tw / 2, label_y + 6), label_text, font=name_font, fill=WHITE)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
