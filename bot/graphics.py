@@ -217,25 +217,90 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     Einfaches generisches Fußballfeld-Layout (3-5-2), kein Template vorhanden.
     formation_slots: {"GK": [(player_name, team_name, logo_url)], "DEF": [...], "MID": [...], "FWD": [...]}
     """
-    width, height = 1150, 1480
+    width, height = 1150, 1520
+    footer_h = 46
     img = Image.new("RGB", (width, height), PITCH_GREEN)
     draw = ImageDraw.Draw(img)
 
     header_h = 120
+    pitch_top = header_h + 20
+    pitch_bottom = height - footer_h - 20
+
+    # Rasen-Maehstreifen statt Einheitsgruen - abwechselnd helle/dunkle Baender,
+    # wie bei einem echten TV-Stadionrasen.
+    stripe_h = 46
+    stripe_dark = tuple(max(0, c - 10) for c in PITCH_GREEN)
+    y = pitch_top
+    stripe_i = 0
+    while y < pitch_bottom:
+        band_bottom = min(y + stripe_h, pitch_bottom)
+        if stripe_i % 2 == 1:
+            draw.rectangle([(20, y), (width - 20, band_bottom)], fill=stripe_dark)
+        y = band_bottom
+        stripe_i += 1
+
+    # Flutlicht-Glanzpunkte oben (wie Flutlicht-Kegel im Stadion bei Nacht)
+    _glow(img, (120, pitch_top + 10), 220, color=(255, 245, 210), alpha=35)
+    _glow(img, (width - 120, pitch_top + 10), 220, color=(255, 245, 210), alpha=35)
+    draw = ImageDraw.Draw(img)
+
+    # Dezentes Pokal-Wasserzeichen mittig auf dem Rasen
+    wm_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    _draw_trophy(wm_layer, width // 2, pitch_bottom - 40, int((pitch_bottom - pitch_top) * 0.62), GOLD)
+    r, g, b, a = wm_layer.split()
+    wm_layer.putalpha(a.point(lambda v: int(v * 0.05)))
+    img.paste(wm_layer, (0, 0), wm_layer)
+    draw = ImageDraw.Draw(img)
+
+    # Vignette: Ecken/Raender dunkler abgesetzt fuer mehr Tiefe/Stadion-Atmosphaere
+    vw, vh = 130, int(130 * height / width)
+    grad = Image.new("L", (vw, vh), 0)
+    gpx = grad.load()
+    cx0, cy0 = vw / 2, vh / 2
+    maxd = (cx0 ** 2 + cy0 ** 2) ** 0.5
+    for gy in range(vh):
+        for gx in range(vw):
+            d = ((gx - cx0) ** 2 + (gy - cy0) ** 2) ** 0.5 / maxd
+            gpx[gx, gy] = int(min(255, max(0, (d - 0.32) / 0.68) * 165))
+    vignette = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+    vignette.putalpha(grad.resize((width, height), Image.BILINEAR))
+    img.paste(vignette, (0, 0), vignette)
+    draw = ImageDraw.Draw(img)
+
     draw.rectangle([(0, 0), (width, header_h)], fill=DARK_BG)
     _glow(img, (width - 140, 32), 180, alpha=60)
     draw = ImageDraw.Draw(img)
     draw.text((44, 22), title, font=_font(42), fill=GOLD)
     draw.text((44, 72), subtitle, font=_font(22), fill=GREY)
 
-    pitch_top = header_h + 20
-    draw.rectangle([(20, pitch_top), (width - 20, height - 20)], outline=PITCH_LINE, width=4)
-    mid_y = pitch_top + (height - 20 - pitch_top) // 2
-    draw.line([(20, mid_y), (width - 20, mid_y)], fill=PITCH_LINE, width=3)
-    draw.ellipse([(width / 2 - 100, mid_y - 100), (width / 2 + 100, mid_y + 100)], outline=PITCH_LINE, width=3)
-    draw.rectangle([(width / 2 - 200, height - 20 - 155), (width / 2 + 200, height - 20)], outline=PITCH_LINE, width=3)
+    # Spielfeldmarkierungen
+    draw.rectangle([(20, pitch_top), (width - 20, pitch_bottom)], outline=PITCH_LINE, width=3)
+    mid_y = pitch_top + (pitch_bottom - pitch_top) // 2
+    draw.line([(20, mid_y), (width - 20, mid_y)], fill=PITCH_LINE, width=2)
+    draw.ellipse([(width / 2 - 100, mid_y - 100), (width / 2 + 100, mid_y + 100)], outline=PITCH_LINE, width=2)
+    draw.ellipse([(width / 2 - 4, mid_y - 4), (width / 2 + 4, mid_y + 4)], fill=PITCH_LINE)
+    draw.rectangle([(width / 2 - 200, pitch_bottom - 155), (width / 2 + 200, pitch_bottom)], outline=PITCH_LINE, width=2)
+    draw.rectangle([(width / 2 - 90, pitch_bottom - 60), (width / 2 + 90, pitch_bottom)], outline=PITCH_LINE, width=2)
+
+    # Goldene Eck-Klammern (Esports-Overlay-Stil) statt schlichter Rechteckkante
+    bracket_len, bracket_w = 46, 5
+    for (bx, by, dx, dy) in [
+        (20, pitch_top, 1, 1), (width - 20, pitch_top, -1, 1),
+        (20, pitch_bottom, 1, -1), (width - 20, pitch_bottom, -1, -1),
+    ]:
+        draw.line([(bx, by), (bx + dx * bracket_len, by)], fill=GOLD, width=bracket_w)
+        draw.line([(bx, by), (bx, by + dy * bracket_len)], fill=GOLD, width=bracket_w)
+
+    # Footer-Leiste mit Marken-Schriftzug
+    _gradient_rounded_rect(img, (0, height - footer_h, width, height), 0, (30, 24, 6), DARK_BG)
+    draw = ImageDraw.Draw(img)
+    draw.line([(0, height - footer_h), (width, height - footer_h)], fill=(90, 74, 20), width=2)
+    footer_text = "FIFA ELITE CUP"
+    fw, _ = _text_size(draw, footer_text, _font(18))
+    draw.text((width / 2 - fw / 2, height - footer_h + 12), footer_text, font=_font(18), fill=GOLD)
 
     logo_size = 82
+    pos_label = {"GK": "TW", "DEF": "ABW", "MID": "MF", "FWD": "ST"}
 
     def _fit_name(name: str, max_w: int) -> tuple[str, "ImageFont.FreeTypeFont", int]:
         """Waehlt die groesstmoegliche Schriftgroesse (mit Untergrenze), die noch
@@ -268,7 +333,10 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                     continue
                 player_name, team_name, logo_url = players[i]
                 cx = int(fx * width)
-                cy = pitch_top + int(fy * (height - 20 - pitch_top))
+                cy = pitch_top + int(fy * (pitch_bottom - pitch_top))
+
+                _glow(img, (cx, cy), 70, alpha=45)
+                draw = ImageDraw.Draw(img)
 
                 logo = await _fetch_logo(session, logo_url, team_name)
                 if logo:
@@ -278,6 +346,16 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                         [(cx - logo_size // 2, cy - logo_size // 2), (cx + logo_size // 2, cy + logo_size // 2)],
                         fill=CARD_BG, outline=GOLD, width=2,
                     )
+
+                # Positions-Badge (TW/ABW/MF/ST) oben rechts am Logo
+                badge = pos_label.get(group, "")
+                if badge:
+                    bw, bh = 34, 20
+                    bx0 = cx + int(logo_size * 0.30)
+                    by0 = cy - logo_size // 2 - bh // 2
+                    draw.rounded_rectangle([(bx0, by0), (bx0 + bw, by0 + bh)], radius=5, fill=GOLD)
+                    tw_b, _ = _text_size(draw, badge, _font(13))
+                    draw.text((bx0 + bw / 2 - tw_b / 2, by0 + 3), badge, font=_font(13), fill=DARK_BG)
 
                 label_text, name_font, tw = _fit_name(player_name, max_label_w)
                 label_y = cy + logo_size // 2 + 10
