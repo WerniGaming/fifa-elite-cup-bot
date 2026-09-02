@@ -1193,12 +1193,15 @@ async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> li
 
 
 async def build_bracket_schedule_file(tournament_id: int, bracket: str) -> discord.File | None:
-    from graphics import render_schedule_image
+    from graphics import render_bracket_tree_image
     sections = await build_bracket_schedule_matches(tournament_id, bracket)
     if not sections:
         return None
     label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
-    buf = await render_schedule_image(label, sections)
+    # Spiel um Platz 3 gehoert nicht in den Hauptbaum (spielt zwischen den Halbfinal-Verlierern,
+    # nicht dem Finalgewinner) - wuerde die Baum-Verbindungslinien verfaelschen, deshalb raus.
+    tree_sections = [s for s in sections if s[0] != "Spiel um Platz 3"]
+    buf = await render_bracket_tree_image(label, tree_sections)
     return discord.File(buf, filename="bracket.png")
 
 

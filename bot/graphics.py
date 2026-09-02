@@ -70,6 +70,57 @@ def _gradient_rounded_rect(img: Image.Image, box, radius: int, color_top: tuple[
     img.paste(gradient, (int(x1), int(y1)), mask)
 
 
+def _draw_trophy(img: Image.Image, cx: int, bottom_y: int, height: int, color: tuple[int, int, int]):
+    """Zeichnet einen stilisierten Pokal (Kelch + Henkel + Stiel + Sockel) direkt mit PIL-Formen -
+    ersetzt den bisherigen platten Farbblock auf dem Podium durch eine echte Trophaee."""
+    draw = ImageDraw.Draw(img)
+    lighter = tuple(min(255, c + 45) for c in color)
+    darker = tuple(max(0, c - 60) for c in color)
+
+    base_w, base_h = height * 0.42, height * 0.09
+    stem_w, stem_h = height * 0.10, height * 0.18
+    bowl_w, bowl_h = height * 0.56, height * 0.48
+    neck_w = height * 0.16
+
+    base_top = bottom_y - base_h
+    stem_top = base_top - stem_h
+    bowl_bottom = stem_top
+    bowl_top = bowl_bottom - bowl_h
+
+    # Sockel (Fuss)
+    draw.rounded_rectangle(
+        [(cx - base_w / 2, base_top), (cx + base_w / 2, bottom_y)], radius=base_h * 0.4, fill=darker
+    )
+    # Stiel
+    draw.rectangle([(cx - stem_w / 2, stem_top), (cx + stem_w / 2, base_top + 2)], fill=color)
+    # Kelch (Trapez von schmalem Hals zu breiter Schale, oben abgerundet per Ellipse)
+    draw.polygon(
+        [
+            (cx - neck_w / 2, bowl_bottom), (cx + neck_w / 2, bowl_bottom),
+            (cx + bowl_w / 2, bowl_top + bowl_h * 0.35), (cx - bowl_w / 2, bowl_top + bowl_h * 0.35),
+        ],
+        fill=color,
+    )
+    draw.ellipse(
+        [(cx - bowl_w / 2, bowl_top), (cx + bowl_w / 2, bowl_top + bowl_h * 0.42)], fill=lighter
+    )
+    # Henkel (zwei Ovale links/rechts der Schale)
+    handle_w, handle_h = bowl_w * 0.34, bowl_h * 0.5
+    handle_y = bowl_top + bowl_h * 0.28
+    for side in (-1, 1):
+        hx = cx + side * (bowl_w / 2 - handle_w * 0.15)
+        draw.ellipse(
+            [(hx - handle_w / 2, handle_y), (hx + handle_w / 2, handle_y + handle_h)],
+            outline=color, width=max(3, int(height * 0.045)),
+        )
+    # Glanzlicht
+    draw.ellipse(
+        [(cx - bowl_w * 0.22, bowl_top + bowl_h * 0.08), (cx - bowl_w * 0.05, bowl_top + bowl_h * 0.28)],
+        fill=(255, 255, 255, 255) if img.mode == "RGBA" else tuple(min(255, c + 70) for c in lighter),
+    )
+    return bowl_top  # oberste Kante, fuer Platzierung von Logo/Name darueber
+
+
 def _glow(img: Image.Image, center: tuple[int, int], radius: int, color: tuple[int, int, int] | None = None, alpha: int = 70):
     """Weicher, verwaschener Farbfleck hinter Titeln/Logos - dasselbe 'Glow'-Element wie die
     goldenen Blur-Kreise hinter den Bento-Karten auf der Website (radial-gradient-artig)."""
@@ -115,8 +166,8 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
     _glow(img, (width - 100, 20), 180, alpha=55)
     draw = ImageDraw.Draw(img)
 
-    draw.text((40, 30), title, font=_font(36), fill=GOLD)
-    draw.text((40, 78), subtitle, font=_font(20), fill=GREY)
+    draw.text((40, 30), title, font=_font(40), fill=GOLD)
+    draw.text((40, 78), subtitle, font=_font(22), fill=GREY)
     draw.line([(40, 120), (width - 40, 120)], fill=GOLD, width=2)
 
     async with aiohttp.ClientSession() as session:
@@ -126,9 +177,9 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
             logo = await _fetch_logo(session, logo_url, team_name)
             _paste_logo(img, logo, (55, y + 15, 55 + (row_h - 50), y + row_h - 35))
             text_x = 55 + (row_h - 50) + 20
-            draw.text((text_x, y + 12), award_name, font=_font(18), fill=GOLD)
-            draw.text((text_x, y + 40), player_name, font=_font(26), fill=WHITE)
-            draw.text((text_x, y + 74), f"{team_name} · {stat_text}", font=_font(18), fill=GREY)
+            draw.text((text_x, y + 12), award_name, font=_font(20), fill=GOLD)
+            draw.text((text_x, y + 40), player_name, font=_font(30), fill=WHITE)
+            draw.text((text_x, y + 74), f"{team_name} · {stat_text}", font=_font(20), fill=GREY)
             y += row_h
 
     buf = io.BytesIO()
@@ -159,8 +210,8 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     draw.rectangle([(0, 0), (width, header_h)], fill=DARK_BG)
     _glow(img, (width - 120, 30), 160, alpha=60)
     draw = ImageDraw.Draw(img)
-    draw.text((40, 20), title, font=_font(34), fill=GOLD)
-    draw.text((40, 66), subtitle, font=_font(18), fill=GREY)
+    draw.text((40, 20), title, font=_font(38), fill=GOLD)
+    draw.text((40, 66), subtitle, font=_font(20), fill=GREY)
 
     pitch_top = header_h + 20
     draw.rectangle([(20, pitch_top), (width - 20, height - 20)], outline=PITCH_LINE, width=4)
@@ -189,7 +240,7 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                         fill=CARD_BG, outline=GOLD, width=2,
                     )
 
-                name_font = _font(20)
+                name_font = _font(22)
                 tw, _ = _text_size(draw, player_name, name_font)
                 label_y = cy + logo_size // 2 + 8
                 draw.rounded_rectangle(
@@ -204,28 +255,30 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
 
 
 PODIUM_COLORS = {1: (255, 215, 80), 2: (200, 205, 212), 3: (200, 140, 80)}
-PODIUM_HEIGHTS = {1: 190, 2: 140, 3: 100}
+PODIUM_TROPHY_HEIGHTS = {1: 190, 2: 145, 3: 120}
 PODIUM_ORDER = [2, 1, 3]  # Anzeige-Reihenfolge links -> rechts
 
 
 async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple[str, str | None]]) -> io.BytesIO:
     """
-    Siegertreppchen-Grafik. places: {1: (team_name, logo_url), 2: (...), 3: (...)} - 2/3 optional.
+    Siegertreppchen-Grafik mit echten Pokal-Formen (statt flachem Farbblock) - 1. Platz
+    bekommt den groessten/hellsten Pokal, mittig und erhoeht wie ein echtes Podium.
+    places: {1: (team_name, logo_url), 2: (...), 3: (...)} - 2/3 optional.
     """
-    width, height = 900, 480
+    width, height = 900, 560
     img = Image.new("RGB", (width, height), DARK_BG)
-    _glow(img, (width // 2, height - 100), 260, alpha=35)
-    _glow(img, (80, 20), 150, alpha=50)
+    _glow(img, (width // 2, height - 140), 300, alpha=40)
+    _glow(img, (90, 20), 160, alpha=55)
     draw = ImageDraw.Draw(img)
-    draw.text((36, 26), title, font=_font(32), fill=GOLD)
-    draw.text((36, 68), subtitle, font=_font(18), fill=GREY)
+    draw.text((36, 26), title, font=_font(38), fill=GOLD)
+    draw.text((36, 76), subtitle, font=_font(21), fill=GREY)
 
-    base_y = height - 50
-    slot_w = 220
-    gap = 30
+    base_y = height - 40
+    slot_w = 240
+    gap = 40
     total_w = slot_w * 3 + gap * 2
     start_x = (width - total_w) // 2
-    logo_size = 84
+    logo_size = 88
 
     async with aiohttp.ClientSession() as session:
         for i, place in enumerate(PODIUM_ORDER):
@@ -233,33 +286,39 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
                 continue
             team_name, logo_url = places[place]
             x = start_x + i * (slot_w + gap)
-            step_h = PODIUM_HEIGHTS[place]
-            step_top = base_y - step_h
+            cx = x + slot_w // 2
             color = PODIUM_COLORS[place]
+            trophy_h = PODIUM_TROPHY_HEIGHTS[place]
+
+            # Podest-Sockel darunter, hoeher fuer Platz 1 - traegt die Trophaee
+            pedestal_h = {1: 70, 2: 46, 3: 30}[place]
+            _gradient_rounded_rect(
+                img, (x + 20, base_y - pedestal_h, x + slot_w - 20, base_y), radius=8,
+                color_top=CARD_BORDER, color_bottom=CARD_BG,
+            )
+            draw = ImageDraw.Draw(img)
+            place_font = _font(28)
+            place_text = f"PLATZ {place}"
+            pw, _ = _text_size(draw, place_text, place_font)
+            draw.text((cx - pw / 2, base_y - pedestal_h / 2 - 14), place_text, font=place_font, fill=color)
+
+            bowl_top = _draw_trophy(img, cx, base_y - pedestal_h, trophy_h, color)
+            draw = ImageDraw.Draw(img)
 
             logo = await _fetch_logo(session, logo_url, team_name)
-            logo_cx = x + slot_w // 2
-            logo_top = step_top - logo_size - 20
+            logo_top = bowl_top - logo_size - 18
             if logo:
-                _paste_logo(img, logo, (logo_cx - logo_size // 2, logo_top, logo_cx + logo_size // 2, logo_top + logo_size))
+                _paste_logo(img, logo, (cx - logo_size // 2, logo_top, cx + logo_size // 2, logo_top + logo_size))
             else:
                 draw.ellipse(
-                    [(logo_cx - logo_size // 2, logo_top), (logo_cx + logo_size // 2, logo_top + logo_size)],
+                    [(cx - logo_size // 2, logo_top), (cx + logo_size // 2, logo_top + logo_size)],
                     fill=CARD_BG, outline=color, width=3,
                 )
 
-            name_font = _font(20)
+            name_font = _font(24)
             name = team_name[:20]
             nw, _ = _text_size(draw, name, name_font)
-            draw.text((logo_cx - nw / 2, logo_top - 32), name, font=name_font, fill=WHITE)
-
-            lighter = tuple(min(255, c + 35) for c in color)
-            _gradient_rounded_rect(img, (x, step_top, x + slot_w, base_y), radius=10, color_top=lighter, color_bottom=color)
-            draw = ImageDraw.Draw(img)
-            place_font = _font(46)
-            place_text = str(place)
-            pw, ph = _text_size(draw, place_text, place_font)
-            draw.text((logo_cx - pw / 2, step_top + step_h / 2 - ph / 2 - 6), place_text, font=place_font, fill=DARK_BG)
+            draw.text((cx - nw / 2, logo_top - 36), name, font=name_font, fill=WHITE)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -272,7 +331,7 @@ async def render_club_stats_card(
     division_text: str | None, medals: list[str], record_text: str | None, goals_text: str | None,
 ) -> io.BytesIO:
     """Kompakte Stat-Karte fuer /club_stats - Kopfbereich (Identitaet + Titel + Bilanz), Details bleiben Text darunter."""
-    width, height = 900, 300
+    width, height = 900, 320
     img = Image.new("RGB", (width, height), DARK_BG)
     _glow(img, (width - 80, 40), 170, alpha=45)
     draw = ImageDraw.Draw(img)
@@ -287,24 +346,134 @@ async def render_club_stats_card(
         draw.ellipse([(36, 36), (36 + logo_size, 36 + logo_size)], fill=CARD_BG, outline=GOLD, width=2)
 
     text_x = 36 + logo_size + 28
-    draw.text((text_x, 34), team_name, font=_font(34), fill=WHITE)
+    draw.text((text_x, 34), team_name, font=_font(38), fill=WHITE)
     if ea_club_name:
-        draw.text((text_x, 78), f"EA-Club: {ea_club_name}", font=_font(18), fill=GREY)
+        draw.text((text_x, 78), f"EA-Club: {ea_club_name}", font=_font(20), fill=GREY)
     if division_text:
-        draw.text((text_x, 108), division_text, font=_font(18), fill=GOLD)
+        draw.text((text_x, 108), division_text, font=_font(20), fill=GOLD)
 
     y = 36 + logo_size + 24
     draw.line([(36, y), (width - 36, y)], fill=(60, 52, 28), width=1)
     y += 24
 
     if medals:
-        draw.text((36, y), "  ".join(medals), font=_font(26), fill=GOLD)
+        draw.text((36, y), "  ".join(medals), font=_font(30), fill=GOLD)
         y += 44
     if record_text:
-        draw.text((36, y), record_text, font=_font(22), fill=WHITE)
+        draw.text((36, y), record_text, font=_font(25), fill=WHITE)
         y += 34
     if goals_text:
-        draw.text((36, y), goals_text, font=_font(20), fill=GREY)
+        draw.text((36, y), goals_text, font=_font(22), fill=GREY)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[dict]]]) -> io.BytesIO:
+    """
+    Echter Turnierbaum fuer die KO-Phase: eine Spalte pro Runde, Spiele als kompakte
+    Karten, mit Verbindungslinien zur naechsten Runde (klassische Bracket-Optik, wie
+    die Baum-Ansicht auf der Website). Nimmt dieselbe sections-Struktur wie
+    render_schedule_image (Liste von (Rundenname, Matches)).
+    """
+    sections = [s for s in sections if s[1]]
+    if not sections:
+        img = Image.new("RGB", (600, 150), DARK_BG)
+        ImageDraw.Draw(img).text((30, 60), "Noch keine KO-Matches.", font=_font(24), fill=GREY)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+
+    card_w, card_h = 300, 90
+    col_gap = 110
+    header_h = 90
+    row_gap0 = 26  # vertikaler Abstand zwischen Karten in Runde 1
+
+    num_round0 = len(sections[0][1])
+    slot_h = card_h + row_gap0
+    height = header_h + num_round0 * slot_h + 20
+    width = header_h - 30 + len(sections) * (card_w + col_gap)
+
+    img = Image.new("RGB", (max(width, 700), max(height, 260)), DARK_BG)
+    _glow(img, (120, 20), 170, alpha=55)
+    draw = ImageDraw.Draw(img)
+    draw.text((36, 26), title, font=_font(34), fill=GOLD)
+    draw.line([(36, header_h - 15), (img.width - 36, header_h - 15)], fill=GOLD, width=2)
+
+    name_font = _font(19)
+    score_font = _font(20)
+    round_label_font = _font(18)
+
+    async def draw_card(session: aiohttp.ClientSession, x: int, cy: int, m: dict) -> int:
+        top = cy - card_h // 2
+        draw.rounded_rectangle([(x, top), (x + card_w, top + card_h)], radius=10, fill=CARD_BG, outline=CARD_BORDER, width=1)
+        mid = top + card_h // 2
+        draw.line([(x + 12, mid), (x + card_w - 12, mid)], fill=CARD_BORDER, width=1)
+
+        completed = m.get("status") == "completed" and m.get("team1_score") is not None
+        s1 = str(m.get("team1_score")) if completed else ""
+        s2 = str(m.get("team2_score")) if completed else ""
+        win1 = completed and m["team1_score"] > m["team2_score"]
+        win2 = completed and m["team2_score"] > m["team1_score"]
+
+        logo_s = 26
+        l1 = await _fetch_logo(session, m.get("team1_logo_url"), m.get("team1_name", ""))
+        l2 = await _fetch_logo(session, m.get("team2_logo_url"), m.get("team2_name", ""))
+        _paste_logo(img, l1, (x + 12, top + 10, x + 12 + logo_s, top + 10 + logo_s), ring=False)
+        _paste_logo(img, l2, (x + 12, top + card_h - 10 - logo_s, x + 12 + logo_s, top + card_h - 10), ring=False)
+
+        name1 = (m.get("team1_name") or "Freilos")[:18]
+        name2 = (m.get("team2_name") or "Freilos")[:18]
+        draw.text((x + 12 + logo_s + 10, top + 12), name1, font=name_font, fill=GOLD if win1 else WHITE)
+        draw.text((x + 12 + logo_s + 10, top + card_h - 12 - 20), name2, font=name_font, fill=GOLD if win2 else WHITE)
+
+        if completed:
+            draw.text((x + card_w - 34, top + 12), s1, font=score_font, fill=GOLD if win1 else GREY)
+            draw.text((x + card_w - 34, top + card_h - 12 - 22), s2, font=score_font, fill=GOLD if win2 else GREY)
+        return mid
+
+    prev_centers: list[int] = []
+    x = header_h - 30
+    async with aiohttp.ClientSession() as session:
+        for round_idx, (round_label, matches) in enumerate(sections):
+            draw.text((x + 4, header_h - 8), round_label, font=round_label_font, fill=GREY)
+
+            if round_idx == 0:
+                centers = [header_h + 20 + i * slot_h + card_h // 2 for i in range(len(matches))]
+            else:
+                centers = []
+                for i in range(len(matches)):
+                    a = prev_centers[2 * i] if 2 * i < len(prev_centers) else None
+                    b = prev_centers[2 * i + 1] if 2 * i + 1 < len(prev_centers) else None
+                    if a is not None and b is not None:
+                        centers.append((a + b) // 2)
+                    elif a is not None:
+                        centers.append(a)
+                    else:
+                        centers.append(header_h + 20 + card_h // 2)
+
+            # Verbindungslinien von der vorherigen Runde zu dieser
+            if round_idx > 0:
+                conn_x = x - col_gap // 2
+                for i, cy in enumerate(centers):
+                    a = prev_centers[2 * i] if 2 * i < len(prev_centers) else None
+                    b = prev_centers[2 * i + 1] if 2 * i + 1 < len(prev_centers) else None
+                    if a is not None:
+                        draw.line([(x - col_gap, a), (conn_x, a)], fill=CARD_BORDER, width=2)
+                    if b is not None:
+                        draw.line([(x - col_gap, b), (conn_x, b)], fill=CARD_BORDER, width=2)
+                    if a is not None and b is not None:
+                        draw.line([(conn_x, a), (conn_x, b)], fill=CARD_BORDER, width=2)
+                    draw.line([(conn_x, cy), (x, cy)], fill=CARD_BORDER, width=2)
+
+            for m, cy in zip(matches, centers):
+                await draw_card(session, x, cy, m)
+
+            prev_centers = centers
+            x += card_w + col_gap
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -322,9 +491,9 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
     team2_logo_url, team1_score, team2_score, status.
     """
     width = 1000
-    header_h = 90
-    section_header_h = 46
-    row_h = 78
+    header_h = 100
+    section_header_h = 50
+    row_h = 86
     padding_bottom = 20
 
     sections_with_games = [s for s in sections if s[1]]
@@ -334,19 +503,19 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
     img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
     _glow(img, (width - 100, 10), 160, alpha=55)
     draw = ImageDraw.Draw(img)
-    draw.text((36, 26), title, font=_font(30), fill=GOLD)
+    draw.text((36, 26), title, font=_font(34), fill=GOLD)
     draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
 
     y = header_h
-    logo_size = 48
-    name_font = _font(19)
-    score_font = _font(23)
+    logo_size = 54
+    name_font = _font(21)
+    score_font = _font(26)
 
     async with aiohttp.ClientSession() as session:
         for section_label, matches in sections:
             if not matches:
                 continue
-            draw.text((36, y + 10), section_label, font=_font(18), fill=GREY)
+            draw.text((36, y + 10), section_label, font=_font(20), fill=GREY)
             y += section_header_h
             for m in matches:
                 row_bottom = y + row_h - 12
