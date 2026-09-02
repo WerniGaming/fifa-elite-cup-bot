@@ -39,7 +39,7 @@ def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = Tr
     Website: border border-gold-dim) - sorgt fuer einen einheitlichen Look."""
     if logo is None:
         return
-    x1, y1, x2, y2 = box
+    x1, y1, x2, y2 = (int(v) for v in box)
     w, h = x2 - x1, y2 - y1
     pad = 6
     target_w, target_h = w - pad * 2, h - pad * 2
