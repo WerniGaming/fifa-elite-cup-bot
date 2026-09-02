@@ -10,7 +10,7 @@ import logging
 import os
 
 import aiohttp
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 log = logging.getLogger("fifa-elite-cup")
 
@@ -34,7 +34,9 @@ async def _fetch_logo(session: aiohttp.ClientSession, url: str | None, label: st
         return None
 
 
-def _paste_logo(img: Image.Image, logo: Image.Image | None, box):
+def _paste_logo(img: Image.Image, logo: Image.Image | None, box, ring: bool = True):
+    """Fuegt ein Logo ein, mit dezentem goldenen Ring drumherum (wie TeamLogo.tsx auf der
+    Website: border border-gold-dim) - sorgt fuer einen einheitlichen Look."""
     if logo is None:
         return
     x1, y1, x2, y2 = box
@@ -46,6 +48,38 @@ def _paste_logo(img: Image.Image, logo: Image.Image | None, box):
     lx = x1 + pad + (target_w - logo_copy.width) // 2
     ly = y1 + pad + (target_h - logo_copy.height) // 2
     img.paste(logo_copy, (lx, ly), logo_copy)
+    if ring:
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([(x1, y1), (x2, y2)], outline=(140, 115, 40), width=2)
+
+
+def _gradient_rounded_rect(img: Image.Image, box, radius: int, color_top: tuple[int, int, int], color_bottom: tuple[int, int, int]):
+    """Abgerundetes Rechteck mit vertikalem Farbverlauf (heller oben) statt Flat-Fill -
+    gleiche 'from-gold/60 to-gold'-Optik wie die Balkendiagramme auf der Website."""
+    x1, y1, x2, y2 = box
+    w, h = int(x2 - x1), int(y2 - y1)
+    if w <= 0 or h <= 0:
+        return
+    gradient = Image.new("RGB", (1, h))
+    for y in range(h):
+        t = y / max(h - 1, 1)
+        gradient.putpixel((0, y), tuple(int(color_top[c] + (color_bottom[c] - color_top[c]) * t) for c in range(3)))
+    gradient = gradient.resize((w, h))
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([(0, 0), (w - 1, h - 1)], radius=radius, fill=255)
+    img.paste(gradient, (int(x1), int(y1)), mask)
+
+
+def _glow(img: Image.Image, center: tuple[int, int], radius: int, color: tuple[int, int, int] | None = None, alpha: int = 70):
+    """Weicher, verwaschener Farbfleck hinter Titeln/Logos - dasselbe 'Glow'-Element wie die
+    goldenen Blur-Kreise hinter den Bento-Karten auf der Website (radial-gradient-artig)."""
+    color = color or GOLD
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ldraw = ImageDraw.Draw(layer)
+    cx, cy = center
+    ldraw.ellipse([(cx - radius, cy - radius), (cx + radius, cy + radius)], fill=(*color, alpha))
+    layer = layer.filter(ImageFilter.GaussianBlur(radius // 2))
+    img.paste(Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB"), (0, 0))
 
 
 GOLD = (255, 215, 80)
@@ -78,6 +112,7 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
     width = 900
     height = 170 + row_h * max(1, len(awards))
     img = Image.new("RGB", (width, height), DARK_BG)
+    _glow(img, (width - 100, 20), 180, alpha=55)
     draw = ImageDraw.Draw(img)
 
     draw.text((40, 30), title, font=_font(36), fill=GOLD)
@@ -122,6 +157,8 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
 
     header_h = 110
     draw.rectangle([(0, 0), (width, header_h)], fill=DARK_BG)
+    _glow(img, (width - 120, 30), 160, alpha=60)
+    draw = ImageDraw.Draw(img)
     draw.text((40, 20), title, font=_font(34), fill=GOLD)
     draw.text((40, 66), subtitle, font=_font(18), fill=GREY)
 
@@ -177,6 +214,8 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
     """
     width, height = 900, 480
     img = Image.new("RGB", (width, height), DARK_BG)
+    _glow(img, (width // 2, height - 100), 260, alpha=35)
+    _glow(img, (80, 20), 150, alpha=50)
     draw = ImageDraw.Draw(img)
     draw.text((36, 26), title, font=_font(32), fill=GOLD)
     draw.text((36, 68), subtitle, font=_font(18), fill=GREY)
@@ -214,7 +253,9 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
             nw, _ = _text_size(draw, name, name_font)
             draw.text((logo_cx - nw / 2, logo_top - 32), name, font=name_font, fill=WHITE)
 
-            draw.rounded_rectangle([(x, step_top), (x + slot_w, base_y)], radius=10, fill=color)
+            lighter = tuple(min(255, c + 35) for c in color)
+            _gradient_rounded_rect(img, (x, step_top, x + slot_w, base_y), radius=10, color_top=lighter, color_bottom=color)
+            draw = ImageDraw.Draw(img)
             place_font = _font(46)
             place_text = str(place)
             pw, ph = _text_size(draw, place_text, place_font)
@@ -233,6 +274,7 @@ async def render_club_stats_card(
     """Kompakte Stat-Karte fuer /club_stats - Kopfbereich (Identitaet + Titel + Bilanz), Details bleiben Text darunter."""
     width, height = 900, 300
     img = Image.new("RGB", (width, height), DARK_BG)
+    _glow(img, (width - 80, 40), 170, alpha=45)
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=(70, 60, 30), width=2)
 
@@ -290,6 +332,7 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
     height = header_h + len(sections_with_games) * section_header_h + total_rows * row_h + padding_bottom
 
     img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
+    _glow(img, (width - 100, 10), 160, alpha=55)
     draw = ImageDraw.Draw(img)
     draw.text((36, 26), title, font=_font(30), fill=GOLD)
     draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
@@ -322,10 +365,13 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
                 draw.text((width - 44 - logo_size - 16 - t2w, cy - 12), t2_name, font=name_font, fill=WHITE)
 
                 if m.get("status") == "completed" and m.get("team1_score") is not None:
-                    score_text, score_fill = f"{m['team1_score']} : {m['team2_score']}", GOLD
+                    score_text, score_fill, pill_outline = f"{m['team1_score']} : {m['team2_score']}", GOLD, GOLD
                 else:
-                    score_text, score_fill = "vs", GREY
-                stw, _ = _text_size(draw, score_text, score_font)
+                    score_text, score_fill, pill_outline = "vs", GREY, CARD_BORDER
+                stw, sth = _text_size(draw, score_text, score_font)
+                pill_pad_x, pill_pad_y = 16, 8
+                pill_box = (width / 2 - stw / 2 - pill_pad_x, cy - sth / 2 - pill_pad_y, width / 2 + stw / 2 + pill_pad_x, cy + sth / 2 + pill_pad_y)
+                draw.rounded_rectangle(pill_box, radius=14, outline=pill_outline, width=2)
                 draw.text((width / 2 - stw / 2, cy - 14), score_text, font=score_font, fill=score_fill)
 
                 y += row_h
