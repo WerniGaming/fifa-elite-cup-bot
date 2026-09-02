@@ -391,10 +391,50 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
     col_gap = 110
     header_h = 90
     row_gap0 = 26  # vertikaler Abstand zwischen Karten in Runde 1
-
-    num_round0 = len(sections[0][1])
     slot_h = card_h + row_gap0
-    height = header_h + num_round0 * slot_h + 20
+
+    # 1. Durchgang (ohne zu zeichnen): Positionen anhand echter Team-IDs berechnen, damit die
+    # Bildhoehe hinterher genau passt - Runden mit nachrueckenden/unverbundenen Teams koennen
+    # weiter nach unten rutschen als Runde 1 allein vorgibt.
+    def compute_layout() -> tuple[list[list[int]], list[list[tuple[int | None, int | None]]], int]:
+        team_center: dict[int | None, int] = {}
+        all_centers: list[list[int]] = []
+        all_anchors: list[list[tuple[int | None, int | None]]] = []
+        max_cy = header_h + 20 + card_h // 2
+        for matches in (s[1] for s in sections):
+            anchors: list[tuple[int | None, int | None]] = []
+            centers: list[int] = []
+            prev_cy: int | None = None
+            for m in matches:
+                a = team_center.get(m.get("team1_id"))
+                b = team_center.get(m.get("team2_id"))
+                anchors.append((a, b))
+                if a is not None and b is not None:
+                    ideal = (a + b) // 2
+                elif a is not None:
+                    ideal = a
+                elif b is not None:
+                    ideal = b
+                else:
+                    ideal = None
+                if ideal is None:
+                    cy = (prev_cy + slot_h) if prev_cy is not None else header_h + 20 + card_h // 2
+                else:
+                    cy = ideal
+                    if prev_cy is not None and cy < prev_cy + slot_h:
+                        cy = prev_cy + slot_h
+                centers.append(cy)
+                prev_cy = cy
+                max_cy = max(max_cy, cy)
+            for m, cy in zip(matches, centers):
+                team_center[m.get("team1_id")] = cy
+                team_center[m.get("team2_id")] = cy
+            all_centers.append(centers)
+            all_anchors.append(anchors)
+        return all_centers, all_anchors, max_cy
+
+    layout_centers, layout_anchors, max_cy = compute_layout()
+    height = max_cy + card_h // 2 + 30
     width = header_h - 30 + len(sections) * (card_w + col_gap)
 
     img = Image.new("RGB", (max(width, 700), max(height, 260)), DARK_BG)
@@ -435,44 +475,30 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
             draw.text((x + card_w - 34, top + card_h - 12 - 22), s2, font=score_font, fill=GOLD if win2 else GREY)
         return mid
 
-    prev_centers: list[int] = []
+    # 2. Durchgang: mit den vorberechneten Positionen tatsaechlich zeichnen.
     x = header_h - 30
     async with aiohttp.ClientSession() as session:
         for round_idx, (round_label, matches) in enumerate(sections):
             draw.text((x + 4, header_h - 8), round_label, font=round_label_font, fill=GREY)
+            centers = layout_centers[round_idx]
+            anchors = layout_anchors[round_idx]
 
-            if round_idx == 0:
-                centers = [header_h + 20 + i * slot_h + card_h // 2 for i in range(len(matches))]
-            else:
-                centers = []
-                for i in range(len(matches)):
-                    a = prev_centers[2 * i] if 2 * i < len(prev_centers) else None
-                    b = prev_centers[2 * i + 1] if 2 * i + 1 < len(prev_centers) else None
-                    if a is not None and b is not None:
-                        centers.append((a + b) // 2)
-                    elif a is not None:
-                        centers.append(a)
-                    else:
-                        centers.append(header_h + 20 + card_h // 2)
-
-            # Verbindungslinien von der vorherigen Runde zu dieser
+            # Verbindungslinien nur dort, wo ein Team wirklich aus der vorherigen Runde kommt
             if round_idx > 0:
                 conn_x = x - col_gap // 2
-                for i, cy in enumerate(centers):
-                    a = prev_centers[2 * i] if 2 * i < len(prev_centers) else None
-                    b = prev_centers[2 * i + 1] if 2 * i + 1 < len(prev_centers) else None
+                for (a, b), cy in zip(anchors, centers):
                     if a is not None:
                         draw.line([(x - col_gap, a), (conn_x, a)], fill=CARD_BORDER, width=2)
                     if b is not None:
                         draw.line([(x - col_gap, b), (conn_x, b)], fill=CARD_BORDER, width=2)
                     if a is not None and b is not None:
-                        draw.line([(conn_x, a), (conn_x, b)], fill=CARD_BORDER, width=2)
-                    draw.line([(conn_x, cy), (x, cy)], fill=CARD_BORDER, width=2)
+                        draw.line([(conn_x, min(a, b)), (conn_x, max(a, b))], fill=CARD_BORDER, width=2)
+                    if a is not None or b is not None:
+                        draw.line([(conn_x, cy), (x, cy)], fill=CARD_BORDER, width=2)
 
             for m, cy in zip(matches, centers):
                 await draw_card(session, x, cy, m)
 
-            prev_centers = centers
             x += card_w + col_gap
 
     buf = io.BytesIO()

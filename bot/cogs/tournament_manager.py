@@ -1155,7 +1155,9 @@ async def build_group_schedule_file(group: dict) -> discord.File:
 
 
 async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> list[tuple[str, list[dict]]]:
-    """Alle Matches eines Brackets, nach Runde gruppiert mit deutschem Rundennamen, inkl. Ergebnis."""
+    """Alle Matches eines Brackets, nach Runde gruppiert mit deutschem Rundennamen, inkl. Ergebnis
+    und Team-IDs (fuer die Baum-Grafik, die Verbindungen anhand echter Teams statt Listenposition
+    zieht - wichtig bei gestaffelten Bracket-Groessen, wo Teams erst spaeter einsteigen)."""
     pool = get_pool()
     matches = await pool.fetch(
         """
@@ -1169,26 +1171,45 @@ async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> li
     team_ids = {m["team1_id"] for m in matches if m["team1_id"]} | {m["team2_id"] for m in matches if m["team2_id"]}
     team_rows = {tid: await get_pool_team(tid) for tid in team_ids}
 
-    sections: list[tuple[str, list[dict]]] = []
-    current_round = None
-    current_matches: list[dict] = []
-    for m in matches:
-        if m["round"] != current_round:
-            if current_matches:
-                label = "Spiel um Platz 3" if all(mm.get("is_third_place_match") for mm in current_matches) else round_name(len(current_matches))
-                sections.append((label, current_matches))
-            current_round = m["round"]
-            current_matches = []
+    def to_dict(m) -> dict:
         t1 = team_rows.get(m["team1_id"]) or {"name": "Freilos", "logo_url": None}
         t2 = team_rows.get(m["team2_id"]) or {"name": "Freilos", "logo_url": None}
-        current_matches.append({
+        return {
+            "team1_id": m["team1_id"], "team2_id": m["team2_id"],
             "team1_name": t1["name"], "team2_name": t2["name"],
             "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
             "team1_score": m["team1_score"], "team2_score": m["team2_score"], "status": m["status"],
-        })
+        }
+
+    # Erst nach Runde gruppieren, Spiel-um-Platz-3 getrennt halten - Rundennamen werden danach
+    # anhand des Abstands zum Finale vergeben (nicht anhand der Match-Anzahl pro Runde: bei
+    # gestaffelten Turniergroessen mit spaeter nachrueckenden Teams kann eine fruehe Runde
+    # zufaellig genauso viele Matches haben wie eine spaetere, das wuerde sonst falsch beschriftet).
+    raw_rounds: list[list[dict]] = []
+    third_place: list[dict] = []
+    current_round = None
+    current_matches: list[dict] = []
+    for m in matches:
+        if m["is_third_place_match"]:
+            third_place.append(to_dict(m))
+            continue
+        if m["round"] != current_round:
+            if current_matches:
+                raw_rounds.append(current_matches)
+            current_round = m["round"]
+            current_matches = []
+        current_matches.append(to_dict(m))
     if current_matches:
-        label = "Spiel um Platz 3" if all(mm.get("is_third_place_match") for mm in current_matches) else round_name(len(current_matches))
-        sections.append((label, current_matches))
+        raw_rounds.append(current_matches)
+
+    sections: list[tuple[str, list[dict]]] = []
+    n = len(raw_rounds)
+    for i, round_matches in enumerate(raw_rounds):
+        offset = n - 1 - i  # 0 = Finale, 1 = Halbfinale, ...
+        label = round_name(2 ** offset)
+        sections.append((label, round_matches))
+    if third_place:
+        sections.append(("Spiel um Platz 3", third_place))
     return sections
 
 
@@ -1332,32 +1353,21 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
             items.append(discord.ui.TextDisplay("\n".join(block)))
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
 
+    bracket_files: list[discord.File] = []
     for bracket, label, icon in (("winner", "Winner Bracket", "🏆"), ("loser", "Loser Bracket", "🥊")):
-        matches = await pool.fetch(
-            """
-            SELECT * FROM tournament_matches WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2
-            ORDER BY round, match_number
-            """,
-            tournament_id, bracket,
-        )
-        if not matches:
+        sections = await build_bracket_schedule_matches(tournament_id, bracket)
+        if not sections:
             continue
-        ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
-        names = await team_name_map(ids)
-        block = [f"### {icon} {label}", ""]
-        current_round = None
-        for m in matches:
-            if m["round"] != current_round:
-                current_round = m["round"]
-                block.append(f"**Runde {current_round}**")
-            t1 = names.get(m["team1_id"], "Freilos") if m["team1_id"] else "Freilos"
-            t2 = names.get(m["team2_id"], "Freilos") if m["team2_id"] else "Freilos"
-            if m["status"] == "completed" and m["team1_score"] is not None:
-                winner_mark = "🟢" if m["winner_id"] else "⚪"
-                block.append(f"{winner_mark} {t1} `{m['team1_score']}:{m['team2_score']}` {t2}")
-            else:
-                block.append(f"⏳ {t1} 🆚 {t2}")
-        items.append(discord.ui.TextDisplay("\n".join(block)))
+        tree_sections = [s for s in sections if s[0] != "Spiel um Platz 3"]
+
+        from graphics import render_bracket_tree_image
+        buf = await render_bracket_tree_image(label, tree_sections)
+        filename = f"bracket_{bracket}.png"
+        file = discord.File(buf, filename=filename)
+        bracket_files.append(file)
+
+        items.append(discord.ui.TextDisplay(f"### {icon} {label}"))
+        items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=f"attachment://{filename}")))
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
 
     now_ts = int(discord.utils.utcnow().timestamp())
@@ -1365,6 +1375,7 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
 
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
+    view.bracket_files = bracket_files
     return view
 
 
@@ -1376,15 +1387,20 @@ async def refresh_live_schedule(bot: commands.Bot, guild: discord.Guild, tournam
     t = await get_tournament(tournament_id)
     view = await build_live_schedule_view(tournament_id)
 
+    files = getattr(view, "bracket_files", [])
+
     if t.get("live_schedule_message_id"):
         try:
             msg = await channel.fetch_message(t["live_schedule_message_id"])
-            await msg.edit(view=view)
+            if files:
+                await msg.edit(view=view, attachments=files)
+            else:
+                await msg.edit(view=view, attachments=[])
             return
         except discord.HTTPException:
             pass
 
-    msg = await channel.send(view=view)
+    msg = await channel.send(view=view, files=files)
     await pool.execute("UPDATE tournaments SET live_schedule_message_id = $1 WHERE id = $2", msg.id, tournament_id)
 
 
