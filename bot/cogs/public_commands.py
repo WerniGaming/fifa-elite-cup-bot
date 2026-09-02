@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import logging
+import os
 
 import discord
 from discord import app_commands
@@ -18,6 +19,7 @@ from db import get_pool
 from ui_helpers import error_embed, info_embed, WEBSITE_URL
 
 log = logging.getLogger("fifa-elite-cup")
+WEBSITE_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "website_banner.jpg")
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 EVENT_EMOJI = {"cup": "🏆", "cash_cup": "💰", "t_cup": "🔥", "special_cup": "👑", "league": "⚽", "sonstiges": "📌"}
@@ -38,9 +40,14 @@ class PublicCommandsCog(commands.Cog):
 
     @app_commands.command(name="website", description="Link zur FIFA Elite Cup Website")
     async def website(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            view=info_embed("🌐 FIFA Elite Cup Website", f"{WEBSITE_URL} — Turniere, Teams, Statistiken, Kalender, Hall of Fame."),
-        )
+        banner_file = discord.File(WEBSITE_BANNER_PATH, filename="website_banner.jpg")
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(
+            discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://website_banner.jpg")),
+            discord.ui.TextDisplay(f"### 🌐 FIFA Elite Cup Website\n{WEBSITE_URL} — Turniere, Teams, Statistiken, Kalender, Hall of Fame."),
+            accent_color=discord.Color.gold(),
+        ))
+        await interaction.response.send_message(view=view, file=banner_file)
 
     @app_commands.command(name="naechstes_event", description="Zeigt den nächsten anstehenden Termin")
     async def naechstes_event(self, interaction: discord.Interaction):

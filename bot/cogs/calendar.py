@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import os
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -22,6 +24,7 @@ from permissions import is_tournament_admin
 from ui_helpers import success_embed, error_embed, info_embed, WEBSITE_URL
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
+KALENDER_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "kalender_banner.jpg")
 
 EVENT_TYPES = {
     "cup": ("🏆", "FIFA Elite Cup"),
@@ -77,13 +80,15 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
     now_ts = int(discord.utils.utcnow().timestamp())
 
     if not events:
+        banner_file = discord.File(KALENDER_BANNER_PATH, filename="kalender_banner.jpg")
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# 🗓️ Kalender\n_Aktuell sind keine Termine geplant._\n\n-# Stand: <t:{now_ts}:R>"),
+            discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://kalender_banner.jpg")),
+            discord.ui.TextDisplay(f"_Aktuell sind keine Termine geplant._\n\n-# Stand: <t:{now_ts}:R>"),
             accent_color=discord.Color.gold(),
         ))
         try:
-            msg = await channel.send(view=view)
+            msg = await channel.send(view=view, files=[banner_file])
             await pool.execute("UPDATE calendar_panel SET message_ids = $1 WHERE guild_id = $2", [msg.id], guild.id)
         except discord.HTTPException:
             pass
@@ -101,10 +106,10 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
     # Alles in EINEM durchgehenden Block: Monatsüberschriften und Termine als
     # TextDisplay/Section-Zeilen mit Separatoren dazwischen, statt vieler einzelner
     # Container (die sehen als separate Karten aus wie eigene Nachrichten).
-    items: list = [discord.ui.TextDisplay(
-        "# 🗓️ FIFA Elite Eventkalender\n"
-        "-# Alle kommenden Cups, Ligen & Termine der FIFA Elite Organisation"
-    )]
+    items: list = [
+        discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://kalender_banner.jpg")),
+        discord.ui.TextDisplay("-# Alle kommenden Cups, Ligen & Termine der FIFA Elite Organisation"),
+    ]
     current_month = None
 
     for e in events:
@@ -147,8 +152,9 @@ async def refresh_calendar(bot: commands.Bot, guild: discord.Guild):
         chunk = items[start:start + MAX_ITEMS_PER_MSG]
         view = discord.ui.LayoutView(timeout=None)
         view.add_item(discord.ui.Container(*chunk, accent_color=discord.Color.gold()))
+        files = [discord.File(KALENDER_BANNER_PATH, filename="kalender_banner.jpg")] if start == 0 else []
         try:
-            msg = await channel.send(view=view)
+            msg = await channel.send(view=view, files=files)
             new_message_ids.append(msg.id)
         except discord.HTTPException:
             pass

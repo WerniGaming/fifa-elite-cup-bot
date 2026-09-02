@@ -17,7 +17,7 @@ from discord.ext import commands
 from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed
 from permissions import is_tournament_admin
-from cogs.team_manager import get_team_managers
+from cogs.team_manager import get_team_managers, get_team_for_user
 from cogs.tournament_manager import reconcile_signups, refresh_panel
 from audit import ACTION_LABELS
 
@@ -414,6 +414,44 @@ class AuditLogView(discord.ui.View):
 class ModerationCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Spieler-Suche-Kanal: nur Vereinsmanager duerfen dort schreiben - alle anderen
+        Nachrichten werden geloescht, mit kurzer selbstloeschender Hinweis-Nachricht
+        (echte ephemeral-Antworten gehen bei normalen Kanal-Nachrichten nicht, nur bei
+        Slash-Command-Interaktionen)."""
+        if message.author.bot or not message.guild:
+            return
+        pool = get_pool()
+        row = await pool.fetchrow(
+            "SELECT player_search_channel_id, team_register_channel_id FROM guild_settings WHERE guild_id = $1",
+            message.guild.id,
+        )
+        if not row or not row["player_search_channel_id"] or message.channel.id != row["player_search_channel_id"]:
+            return
+        if message.author.guild_permissions.administrator or message.author.guild_permissions.manage_messages:
+            return
+
+        team = await get_team_for_user(message.guild.id, message.author.id)
+        if team is not None:
+            return
+
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
+        register_hint = f"<#{row['team_register_channel_id']}>" if row["team_register_channel_id"] else "dem Team-Registrieren-Kanal"
+        try:
+            await message.channel.send(
+                f"{message.author.mention} nur **Vereinsmanager** dürfen hier schreiben. "
+                f"Registriere zuerst dein Team in {register_hint}.",
+                delete_after=8,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        except discord.HTTPException:
+            pass
 
     @app_commands.command(name="audit_log", description="Zeigt das Audit-Log (wer hat wann was gemacht) - nur Admins")
     @app_commands.describe(aktion="Nur diese Art von Aktion anzeigen (optional)")

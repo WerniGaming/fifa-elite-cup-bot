@@ -180,6 +180,9 @@ async def refresh_all_team_logo_urls(bot: commands.Bot):
         log.info(f"Team-Logo-URLs aufgefrischt: {refreshed} ok, {failed} fehlgeschlagen.")
 
 
+STREAM_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "stream_banner.jpg")
+
+
 async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
     """Baut die Stream-Link-Uebersicht neu auf (oder legt sie an) im konfigurierten Kanal."""
     pool = get_pool()
@@ -199,7 +202,7 @@ async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
         guild.id,
     )
 
-    lines = ["# 📺 Stream-Übersicht", ""]
+    lines = []
     if teams:
         lines += [f"**{t['name']}** — {t['stream_link']}" for t in teams]
     else:
@@ -209,19 +212,24 @@ async def refresh_stream_list(bot: commands.Bot, guild: discord.Guild):
     lines.append(f"-# Zuletzt aktualisiert: <t:{now_ts}:R>")
     text = "\n".join(lines)
 
+    banner_file = discord.File(STREAM_BANNER_PATH, filename="stream_banner.jpg")
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
+    view.add_item(discord.ui.Container(
+        discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://stream_banner.jpg")),
+        discord.ui.TextDisplay(text),
+        accent_color=discord.Color.gold(),
+    ))
 
     if settings["stream_list_message_id"]:
         try:
             msg = await channel.fetch_message(settings["stream_list_message_id"])
-            await msg.edit(view=view)
+            await msg.edit(view=view, attachments=[banner_file])
             return
         except discord.HTTPException:
             pass
 
     try:
-        msg = await channel.send(view=view)
+        msg = await channel.send(view=view, files=[banner_file])
         await pool.execute(
             "UPDATE guild_settings SET stream_list_message_id = $1 WHERE guild_id = $2", msg.id, guild.id
         )
@@ -865,6 +873,12 @@ class TeamManagerCog(commands.Cog):
         panel = TeamManagerPanel()
         await interaction.response.send_message(view=success_embed("Team-Manager-Panel wird gepostet..."), ephemeral=True)
         await interaction.channel.send(view=panel, files=[panel.banner_file])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, team_register_channel_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET team_register_channel_id = $2",
+            interaction.guild_id, interaction.channel_id,
+        )
 
     @app_commands.command(name="team_overview_setup", description="Legt diesen Kanal als Live-Vereins-Übersicht fest (Admin)")
     @app_commands.checks.has_permissions(administrator=True)

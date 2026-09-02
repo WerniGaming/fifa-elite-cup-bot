@@ -279,6 +279,7 @@ class AdminSystemMenu(discord.ui.View):
         self.add_item(discord.ui.Button(label="Team-Manager (Admin)", style=discord.ButtonStyle.secondary, custom_id="admin:teammanager"))
         self.add_item(discord.ui.Button(label="Live-Log-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setauditchannel"))
         self.add_item(discord.ui.Button(label="Live-Ergebnis-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setresultschannel"))
+        self.add_item(discord.ui.Button(label="Spieler-Suche-Kanal einstellen", style=discord.ButtonStyle.secondary, custom_id="admin:setplayersearchchannel"))
 
 
 class AuditChannelSelectView(discord.ui.View):
@@ -318,6 +319,27 @@ class ResultsChannelSelectView(discord.ui.View):
         )
         await interaction.response.edit_message(
             content=None, view=success_embed("Live-Ergebnis-Kanal gesetzt", f"<#{channel_id}>")
+        )
+
+
+class PlayerSearchChannelSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        select = discord.ui.ChannelSelect(placeholder="Spieler-Suche-Kanal wählen...", channel_types=[discord.ChannelType.text])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        channel_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, player_search_channel_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET player_search_channel_id = $2",
+            interaction.guild_id, channel_id,
+        )
+        await interaction.response.edit_message(
+            content=None,
+            view=success_embed("Spieler-Suche-Kanal gesetzt", f"<#{channel_id}> — nur noch Vereinsmanager dürfen dort schreiben."),
         )
 
 
@@ -1367,7 +1389,7 @@ class AdminPanelCog(commands.Cog):
             if not user_bans and not team_bans:
                 await interaction.response.send_message(view=info_embed("Aktuell ist niemand/kein Team gesperrt."), ephemeral=True)
                 return
-            blocks = ["### Gesperrte Spieler & Teams"]
+            blocks = []
             if user_bans:
                 lines = ["**Spieler:**"]
                 for b in user_bans:
@@ -1380,7 +1402,11 @@ class AdminPanelCog(commands.Cog):
                     until = b["expires_at"].strftime("%d.%m.%Y %H:%M") if b["expires_at"] else "dauerhaft"
                     lines.append(f"**{b['team_name']}** - bis {until} - Grund: {b['reason'] or 'keiner'}")
                 blocks.append("\n".join(lines))
-            await interaction.response.send_message(content="\n\n".join(blocks), view=UnbanSelect(user_bans, team_bans), ephemeral=True)
+            banner_path = os.path.join(os.path.dirname(__file__), "..", "assets", "sperren_banner.jpg")
+            await interaction.response.send_message(
+                content="\n\n".join(blocks), file=discord.File(banner_path, filename="sperren_banner.jpg"),
+                view=UnbanSelect(user_bans, team_bans), ephemeral=True,
+            )
 
         elif action == "auditlog":
             from cogs.moderation import AuditLogView
@@ -1411,6 +1437,16 @@ class AdminPanelCog(commands.Cog):
             await interaction.response.send_message(
                 content=f"**Live-Ergebnis-Kanal einstellen**\nAktuell: {current}\nJedes fertig gespielte Match wird sofort hier gepostet.",
                 view=ResultsChannelSelectView(),
+                ephemeral=True,
+            )
+
+        elif action == "setplayersearchchannel":
+            pool = get_pool()
+            row = await pool.fetchrow("SELECT player_search_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
+            current = f"<#{row['player_search_channel_id']}>" if row and row["player_search_channel_id"] else "keiner gesetzt"
+            await interaction.response.send_message(
+                content=f"**Spieler-Suche-Kanal einstellen**\nAktuell: {current}\nIn diesem Kanal dürfen nur Vereinsmanager schreiben - alle anderen Nachrichten werden automatisch gelöscht.",
+                view=PlayerSearchChannelSelectView(),
                 ephemeral=True,
             )
 
