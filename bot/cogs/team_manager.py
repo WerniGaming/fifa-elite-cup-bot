@@ -18,6 +18,7 @@ import re
 import os
 
 import asyncpg
+from PIL import Image
 
 from db import get_pool
 from ea_api import EAProClubsAPI
@@ -31,6 +32,22 @@ TWITCH_LINK_PATTERN = re.compile(r"^https://www\.twitch\.tv/[A-Za-z0-9_]+/?$")
 
 def is_valid_twitch_link(value: str) -> bool:
     return bool(TWITCH_LINK_PATTERN.match(value.strip()))
+
+
+def _crop_to_square(file_bytes: bytes) -> bytes:
+    """Schneidet ein Bild mittig auf ein 1:1-Seitenverhaeltnis zu (laengere Seite wird gekuerzt),
+    damit Logos ueberall (Kreis-Avatare, Bot-Grafiken) sauber aussehen statt verzerrt/schief."""
+    img = Image.open(io.BytesIO(file_bytes))
+    img = img.convert("RGBA") if img.mode in ("P", "RGBA", "LA") else img.convert("RGB")
+    w, h = img.size
+    if w != h:
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
 
 
 async def save_team_logo_attachment(guild: discord.Guild, team_id: int, attachment) -> tuple[bool, str]:
@@ -61,9 +78,15 @@ async def save_team_logo_attachment(guild: discord.Guild, team_id: int, attachme
 
     try:
         file_bytes = await attachment.read()
+        try:
+            file_bytes = _crop_to_square(file_bytes)
+            filename = "logo.png"
+        except Exception:
+            log.exception(f"Logo fuer Team {team_id} konnte nicht quadratisch zugeschnitten werden, speichere Original.")
+            filename = attachment.filename
         permanent_msg = await storage_channel.send(
             content=f"Logo für Team-ID {team_id}",
-            file=discord.File(io.BytesIO(file_bytes), filename=attachment.filename),
+            file=discord.File(io.BytesIO(file_bytes), filename=filename),
         )
         permanent_url = permanent_msg.attachments[0].url
     except Exception:
