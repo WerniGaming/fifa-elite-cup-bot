@@ -8,12 +8,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import logging
+
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from db import get_pool
 from ui_helpers import error_embed, info_embed, WEBSITE_URL
+
+log = logging.getLogger("fifa-elite-cup")
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 EVENT_EMOJI = {"cup": "🏆", "cash_cup": "💰", "t_cup": "🔥", "special_cup": "👑", "league": "⚽", "sonstiges": "📌"}
@@ -232,6 +236,215 @@ class PublicCommandsCog(commands.Cog):
             view=info_embed(f"{name_map[id1]} vs. {name_map[id2]}", detail + f"\n\n-# Details auf {WEBSITE_URL}/vergleich?a={id1}&b={id2}")
         )
 
+    @app_commands.command(name="rivalen", description="Der meistgespielte Gegner eines Teams")
+    @app_commands.autocomplete(team=_team_autocomplete)
+    async def rivalen(self, interaction: discord.Interaction, team: str):
+        pool = get_pool()
+        try:
+            team_id = int(team)
+        except ValueError:
+            await interaction.response.send_message(view=error_embed("Bitte ein Team aus der Vorschlagsliste wählen."), ephemeral=True)
+            return
+        team_row = await pool.fetchrow("SELECT name FROM teams WHERE id = $1 AND guild_id = $2", team_id, interaction.guild_id)
+        if not team_row:
+            await interaction.response.send_message(view=error_embed("Team nicht gefunden."), ephemeral=True)
+            return
+
+        row = await pool.fetchrow(
+            """
+            SELECT
+                CASE WHEN tm.team1_id = $1 THEN tm.team2_id ELSE tm.team1_id END AS opponent_id,
+                COUNT(*) AS matches,
+                COUNT(*) FILTER (WHERE tm.winner_id = $1) AS wins,
+                COUNT(*) FILTER (WHERE tm.winner_id IS NOT NULL AND tm.winner_id != $1) AS losses,
+                COUNT(*) FILTER (WHERE tm.winner_id IS NULL) AS draws
+            FROM tournament_matches tm
+            WHERE tm.status = 'completed' AND (tm.team1_id = $1 OR tm.team2_id = $1)
+            GROUP BY opponent_id
+            ORDER BY matches DESC LIMIT 1
+            """,
+            team_id,
+        )
+        if not row:
+            await interaction.response.send_message(view=info_embed(f"{team_row['name']} hat noch keine gespielten Matches."))
+            return
+        opponent = await pool.fetchrow("SELECT name FROM teams WHERE id = $1", row["opponent_id"])
+        await interaction.response.send_message(
+            view=info_embed(
+                f"🥊 Größter Rivale von {team_row['name']}",
+                f"**{opponent['name']}** — {row['matches']} Duelle ({row['wins']}S {row['draws']}U {row['losses']}N)",
+            )
+        )
+
+    @app_commands.command(name="bracket", description="KO-Phase des aktuellsten Turniers als Textbaum")
+    async def bracket(self, interaction: discord.Interaction):
+        pool = get_pool()
+        t = await pool.fetchrow(
+            """
+            SELECT id, name FROM tournaments
+            WHERE guild_id = $1 AND phase IN ('knockout', 'finished')
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            interaction.guild_id,
+        )
+        if not t:
+            await interaction.response.send_message(view=info_embed("Aktuell läuft keine KO-Phase."))
+            return
+
+        rows = await pool.fetch(
+            """
+            SELECT tm.round, tm.bracket, tm.team1_score, tm.team2_score, tm.status,
+                t1.name AS team1_name, t2.name AS team2_name
+            FROM tournament_matches tm
+            LEFT JOIN teams t1 ON t1.id = tm.team1_id
+            LEFT JOIN teams t2 ON t2.id = tm.team2_id
+            WHERE tm.tournament_id = $1 AND tm.phase = 'knockout' AND tm.is_third_place_match = false
+            ORDER BY tm.bracket, tm.round
+            """,
+            t["id"],
+        )
+        if not rows:
+            await interaction.response.send_message(view=info_embed("Für dieses Turnier gibt es noch keine KO-Matches."))
+            return
+
+        blocks = []
+        for bracket_name in ("winner", "loser"):
+            bracket_rows = [r for r in rows if r["bracket"] == bracket_name]
+            if not bracket_rows:
+                continue
+            lines = [f"**{'Winner' if bracket_name == 'winner' else 'Loser'} Bracket**"]
+            current_round = None
+            for r in bracket_rows:
+                if r["round"] != current_round:
+                    current_round = r["round"]
+                    lines.append(f"_Runde {current_round}_")
+                score = f"{r['team1_score']}:{r['team2_score']}" if r["status"] == "completed" else "vs"
+                lines.append(f"`{r['team1_name'] or 'Freilos'}` {score} `{r['team2_name'] or 'Freilos'}`")
+            blocks.append("\n".join(lines))
+
+        await interaction.response.send_message(
+            view=info_embed(f"🏆 {t['name']}", "\n\n".join(blocks) + f"\n\n-# Visueller Baum auf {WEBSITE_URL}/turniere/{t['id']}")
+        )
+
+    @app_commands.command(name="matchtag", description="Offene Spiele des aktuell laufenden Turniers")
+    async def matchtag(self, interaction: discord.Interaction):
+        pool = get_pool()
+        rows = await pool.fetch(
+            """
+            SELECT tm.round, tm.bracket, t1.name AS team1_name, t2.name AS team2_name, t.name AS tournament_name
+            FROM tournament_matches tm
+            JOIN tournaments t ON t.id = tm.tournament_id
+            LEFT JOIN teams t1 ON t1.id = tm.team1_id
+            LEFT JOIN teams t2 ON t2.id = tm.team2_id
+            WHERE t.guild_id = $1 AND t.status = 'started' AND tm.status != 'completed'
+                AND tm.team1_id IS NOT NULL AND tm.team2_id IS NOT NULL
+            ORDER BY tm.round LIMIT 15
+            """,
+            interaction.guild_id,
+        )
+        if not rows:
+            await interaction.response.send_message(view=info_embed("Aktuell stehen keine offenen Spiele an."))
+            return
+        lines = [f"⚽ **{r['team1_name']}** vs **{r['team2_name']}** _({r['tournament_name']})_" for r in rows]
+        await interaction.response.send_message(view=info_embed("📅 Offene Spiele", "\n".join(lines)))
+
+
+class WeeklyDigestCog(commands.Cog):
+    """Postet jeden Montag eine kurze Wochenzusammenfassung (Topscorer, Ergebnisse) in den
+    Live-Ergebnis-Kanal, falls einer konfiguriert ist - kein zusaetzlicher Kanal noetig."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    async def cog_load(self):
+        self._digest_task.start()
+
+    def cog_unload(self):
+        self._digest_task.cancel()
+
+    @tasks.loop(hours=24)
+    async def _digest_task(self):
+        now_berlin = datetime.now(BERLIN_TZ)
+        if now_berlin.weekday() != 0:  # nur montags
+            return
+        pool = get_pool()
+        guild_rows = await pool.fetch("SELECT DISTINCT guild_id FROM guild_settings WHERE results_feed_channel_id IS NOT NULL")
+        for g in guild_rows:
+            channel_row = await pool.fetchrow(
+                "SELECT results_feed_channel_id FROM guild_settings WHERE guild_id = $1", g["guild_id"]
+            )
+            channel = self.bot.get_channel(channel_row["results_feed_channel_id"])
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(channel_row["results_feed_channel_id"])
+                except discord.HTTPException:
+                    continue
+
+            week_ago = datetime.now(timezone.utc)
+            matches = await pool.fetchval(
+                """
+                SELECT COUNT(*) FROM tournament_matches tm
+                JOIN teams te ON te.id = tm.team1_id
+                WHERE te.guild_id = $1 AND tm.status = 'completed' AND tm.created_at > now() - interval '7 days'
+                """,
+                g["guild_id"],
+            )
+            top_scorer = await pool.fetchrow(
+                """
+                SELECT tps.player_name, SUM(tps.goals) AS goals
+                FROM tournament_player_stats tps
+                JOIN teams te ON te.id = tps.team_id
+                WHERE te.guild_id = $1
+                GROUP BY tps.player_name ORDER BY goals DESC LIMIT 1
+                """,
+                g["guild_id"],
+            )
+            if not matches:
+                continue
+            text = f"📊 **Wochenrückblick**\n{matches} Spiele in den letzten 7 Tagen."
+            if top_scorer:
+                text += f"\n⚽ Aktueller Topscorer: **{top_scorer['player_name']}** ({top_scorer['goals']} Tore)"
+            text += f"\n-# Mehr auf {WEBSITE_URL}/stats"
+            try:
+                await channel.send(text)
+            except discord.HTTPException:
+                pass
+
+    @_digest_task.before_loop
+    async def _before_digest(self):
+        await self.bot.wait_until_ready()
+
+
+class BotStatusCog(commands.Cog):
+    """Aktualisiert den Bot-Status ('Watching X Teams') periodisch - kleine, aber staendig
+    sichtbare Erinnerung, dass der Bot laeuft, ohne dass jemand extra nachschauen muss."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    async def cog_load(self):
+        self._status_task.start()
+
+    def cog_unload(self):
+        self._status_task.cancel()
+
+    @tasks.loop(minutes=30)
+    async def _status_task(self):
+        pool = get_pool()
+        team_count = await pool.fetchval("SELECT COUNT(*) FROM teams")
+        try:
+            await self.bot.change_presence(
+                activity=discord.Activity(type=discord.ActivityType.watching, name=f"{team_count} Teams · fifaelite.de")
+            )
+        except discord.HTTPException:
+            log.warning("Konnte Bot-Status nicht aktualisieren.")
+
+    @_status_task.before_loop
+    async def _before_status(self):
+        await self.bot.wait_until_ready()
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(PublicCommandsCog(bot))
+    await bot.add_cog(WeeklyDigestCog(bot))
+    await bot.add_cog(BotStatusCog(bot))
