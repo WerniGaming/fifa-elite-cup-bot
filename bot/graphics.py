@@ -300,7 +300,14 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
     draw.text((width / 2 - fw / 2, height - footer_h + 12), footer_text, font=_font(18), fill=GOLD)
 
     logo_size = 82
-    pos_label = {"GK": "TW", "DEF": "ABW", "MID": "MF", "FWD": "ST"}
+    # Genaue Positionslabels statt grober Gruppennamen - jeweils links -> rechts
+    # passend zu TOP11_LAYOUTs x-Reihenfolge je Gruppe.
+    pos_labels = {
+        "GK": ["TW"],
+        "DEF": ["LIV", "IV", "RIV"],
+        "MID": ["LM", "LZDM", "ZOM", "RZDM", "RM"],
+        "FWD": ["ST", "ST"],
+    }
 
     def _fit_name(name: str, max_w: int) -> tuple[str, "ImageFont.FreeTypeFont", int]:
         """Waehlt die groesstmoegliche Schriftgroesse (mit Untergrenze), die noch
@@ -347,15 +354,17 @@ async def render_top11_image(title: str, subtitle: str, formation_slots: dict[st
                         fill=CARD_BG, outline=GOLD, width=2,
                     )
 
-                # Positions-Badge (TW/ABW/MF/ST) oben rechts am Logo
-                badge = pos_label.get(group, "")
+                # Positions-Badge (z.B. LM/RIV/ZOM) oben rechts am Logo
+                group_labels = pos_labels.get(group, [])
+                badge = group_labels[i] if i < len(group_labels) else group
                 if badge:
-                    bw, bh = 34, 20
+                    badge_font = _font(13)
+                    tw_b, _ = _text_size(draw, badge, badge_font)
+                    bw, bh = tw_b + 16, 20
                     bx0 = cx + int(logo_size * 0.30)
                     by0 = cy - logo_size // 2 - bh // 2
                     draw.rounded_rectangle([(bx0, by0), (bx0 + bw, by0 + bh)], radius=5, fill=GOLD)
-                    tw_b, _ = _text_size(draw, badge, _font(13))
-                    draw.text((bx0 + bw / 2 - tw_b / 2, by0 + 3), badge, font=_font(13), fill=DARK_BG)
+                    draw.text((bx0 + bw / 2 - tw_b / 2, by0 + 3), badge, font=badge_font, fill=DARK_BG)
 
                 label_text, name_font, tw = _fit_name(player_name, max_label_w)
                 label_y = cy + logo_size // 2 + 10
