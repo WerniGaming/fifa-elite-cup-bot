@@ -154,6 +154,7 @@ GOLD = (255, 215, 80)
 DARK_BG = (0, 0, 0)
 CARD_BG = (19, 19, 19)
 CARD_BORDER = (38, 38, 38)
+FRAME_BORDER = (55, 46, 20)  # dezenter goldbrauner Aussenrahmen, wie im neuen Embed-Banner
 WHITE = (235, 235, 240)
 GREY = (150, 150, 160)
 PITCH_GREEN = (24, 92, 48)
@@ -180,10 +181,11 @@ async def render_awards_image(title: str, subtitle: str, awards: list[tuple[str,
     img = Image.new("RGB", (width, height), DARK_BG)
     _glow(img, (width - 100, 20), 180, alpha=55)
     draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=FRAME_BORDER, width=2)
 
     draw.text((40, 30), title, font=_font(40), fill=GOLD)
     draw.text((40, 78), subtitle, font=_font(22), fill=GREY)
-    draw.line([(40, 120), (width - 40, 120)], fill=GOLD, width=2)
+    draw.rectangle([(40, 112), (104, 117)], fill=GOLD)
 
     async with aiohttp.ClientSession() as session:
         y = 150
@@ -395,8 +397,10 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
     _glow(img, (width // 2, height - 140), 300, alpha=40)
     _glow(img, (90, 20), 160, alpha=55)
     draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=FRAME_BORDER, width=2)
     draw.text((36, 26), title, font=_font(38), fill=GOLD)
     draw.text((36, 76), subtitle, font=_font(21), fill=GREY)
+    draw.rectangle([(36, 110), (100, 115)], fill=GOLD)
 
     base_y = height - 40
     slot_w = 240
@@ -460,7 +464,7 @@ async def render_club_stats_card(
     img = Image.new("RGB", (width, height), DARK_BG)
     _glow(img, (width - 80, 40), 170, alpha=45)
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=(70, 60, 30), width=2)
+    draw.rounded_rectangle([(0, 0), (width - 1, height - 1)], radius=20, outline=FRAME_BORDER, width=2)
 
     logo_size = 110
     async with aiohttp.ClientSession() as session:
@@ -476,9 +480,10 @@ async def render_club_stats_card(
         draw.text((text_x, 78), f"EA-Club: {ea_club_name}", font=_font(20), fill=GREY)
     if division_text:
         draw.text((text_x, 108), division_text, font=_font(20), fill=GOLD)
+    draw.rectangle([(text_x, 140), (text_x + 64, 145)], fill=GOLD)
 
     y = 36 + logo_size + 24
-    draw.line([(36, y), (width - 36, y)], fill=(60, 52, 28), width=1)
+    draw.line([(36, y), (width - 36, y)], fill=FRAME_BORDER, width=1)
     y += 24
 
     if medals:
@@ -565,8 +570,9 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
     img = Image.new("RGB", (max(width, 700), max(height, 260)), DARK_BG)
     _glow(img, (120, 20), 170, alpha=55)
     draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (img.width - 1, img.height - 1)], radius=16, outline=FRAME_BORDER, width=2)
     draw.text((36, 26), title, font=_font(34), fill=GOLD)
-    draw.line([(36, header_h - 15), (img.width - 36, header_h - 15)], fill=GOLD, width=2)
+    draw.rectangle([(36, 76), (100, 81)], fill=GOLD)
 
     name_font = _font(19)
     score_font = _font(20)
@@ -654,8 +660,9 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
     img = Image.new("RGB", (width, max(height, 200)), DARK_BG)
     _glow(img, (width - 100, 10), 160, alpha=55)
     draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([(0, 0), (width - 1, max(height, 200) - 1)], radius=18, outline=FRAME_BORDER, width=2)
     draw.text((36, 26), title, font=_font(34), fill=GOLD)
-    draw.line([(36, header_h - 15), (width - 36, header_h - 15)], fill=GOLD, width=2)
+    draw.rectangle([(36, 80), (100, 85)], fill=GOLD)
 
     y = header_h
     logo_size = 54
