@@ -100,6 +100,21 @@ async def save_team_logo_attachment(guild: discord.Guild, team_id: int, attachme
     return True, "Logo aktualisiert!"
 
 
+async def fetch_member_safe(guild: discord.Guild, user_id: int) -> discord.Member | None:
+    """guild.get_member() liefert nur etwas, wenn der Member-Cache bereits gefuellt ist -
+    bei den Standalone-Skripten (Login ohne Gateway-Verbindung, siehe Session-Konventionen)
+    ist der Cache immer leer, wodurch Rollen-/Nickname-Reset beim Team-Aufloesen bisher
+    stillschweigend uebersprungen wurde (live per API bestaetigt: VM-/Co-Manager-Rollen
+    blieben nach dem Aufloesen bestehen). Faellt deshalb auf einen echten API-Call zurueck."""
+    member = guild.get_member(user_id)
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except discord.HTTPException:
+        return None
+
+
 async def apply_team_nickname(member: discord.Member, team_name: str) -> bool:
     """Setzt den Server-Nickname auf 'Team | Username'. Gibt False zurueck, falls keine Berechtigung."""
     base_username = member.name
@@ -634,7 +649,7 @@ class TeamRenameModal(discord.ui.Modal, title="Team umbenennen"):
         # Nicknames aller Manager auf den neuen Namen umstellen (bestehendes Format "Team | User")
         managers = await get_team_managers(self.team_id)
         for m in managers:
-            member = interaction.guild.get_member(m["discord_id"])
+            member = await fetch_member_safe(interaction.guild, m["discord_id"])
             if member:
                 await apply_team_nickname(member, new_name)
 
@@ -755,7 +770,7 @@ class CoManagerView(discord.ui.View):
         except Exception:
             await interaction.response.send_message(view=warning_embed(f"{user.mention} ist bereits Manager dieses Teams."), ephemeral=True)
             return
-        member = interaction.guild.get_member(user.id)
+        member = await fetch_member_safe(interaction.guild, user.id)
         if member:
             await apply_team_nickname(member, self.team["name"])
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=True)
@@ -773,7 +788,7 @@ class CoManagerView(discord.ui.View):
             await interaction.response.send_message(view=warning_embed("Der Team-Owner kann hier nicht entfernt werden."), ephemeral=True)
             return
         await pool.execute("DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2", self.team["id"], user.id)
-        member = interaction.guild.get_member(user.id)
+        member = await fetch_member_safe(interaction.guild, user.id)
         if member:
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=False)
             await reset_team_nickname(member)
@@ -808,7 +823,7 @@ class LeaveConfirmView(discord.ui.View):
             from audit import log_action
             await log_action(interaction.guild_id, interaction.user, "team.deleted", "team", self.team["id"], self.team["name"])
             for m in managers:
-                member = interaction.guild.get_member(m["discord_id"])
+                member = await fetch_member_safe(interaction.guild, m["discord_id"])
                 if not member:
                     continue
                 role_column = "vm_role_id" if m["role"] == "owner" else "co_manager_role_id"
@@ -861,7 +876,7 @@ async def dissolve_team_by_admin(bot: commands.Bot, guild: discord.Guild, team: 
         dm_text += f"\n**Grund:** {reason}"
 
     for m in managers:
-        member = guild.get_member(m["discord_id"])
+        member = await fetch_member_safe(guild, m["discord_id"])
         if member:
             role_column = "vm_role_id" if m["role"] == "owner" else "co_manager_role_id"
             await _toggle_configured_role(guild, member, role_column, grant=False)
