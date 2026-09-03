@@ -9,6 +9,7 @@ anmelden (egal welcher Manager es versucht).
 """
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
+import re
 
 import discord
 from discord import app_commands
@@ -20,6 +21,8 @@ from permissions import is_tournament_admin
 from cogs.team_manager import get_team_managers, get_team_for_user
 from cogs.tournament_manager import reconcile_signups, refresh_panel
 from audit import ACTION_LABELS
+
+URL_PATTERN = re.compile(r"https?://\S+")
 
 
 # ---------- Spieler-Sperren ----------
@@ -454,14 +457,16 @@ class ModerationCog(commands.Cog):
             return
 
         if row["media_only_channel_id"] and message.channel.id == row["media_only_channel_id"] and not is_mod:
-            if message.content.strip():
+            content = message.content.strip()
+            has_link = bool(URL_PATTERN.search(content))
+            if content and not has_link:
                 try:
                     await message.delete()
                 except discord.HTTPException:
                     pass
                 try:
                     await message.channel.send(
-                        f"{message.author.mention} hier sind nur **Bilder & Videos** erlaubt, kein Text.",
+                        f"{message.author.mention} hier sind nur **Bilder, Videos & Links** erlaubt, kein reiner Text.",
                         delete_after=8,
                         allowed_mentions=discord.AllowedMentions(users=True),
                     )

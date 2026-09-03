@@ -361,7 +361,7 @@ class MediaChannelSelectView(discord.ui.View):
         )
         await interaction.response.edit_message(
             content=None,
-            view=success_embed("Medien-Kanal gesetzt", f"<#{channel_id}> — dort ist ab jetzt nur noch Text verboten, Bilder/Videos bleiben erlaubt."),
+            view=success_embed("Medien-Kanal gesetzt", f"<#{channel_id}> — reiner Text ist ab jetzt verboten, Bilder/Videos/Links bleiben erlaubt."),
         )
 
 
