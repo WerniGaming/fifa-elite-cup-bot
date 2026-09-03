@@ -270,6 +270,56 @@ async def get_team_tournament_history(pool, team_id: int) -> list[str]:
     return lines
 
 
+def build_team_block(team: dict, owner_id: int | None, comanager_ids: list[int], history: list[str]) -> discord.ui.Item:
+    """Ein Team als TextDisplay - mit kleinem Logo-Thumbnail rechts daneben, falls das
+    Team eins hinterlegt hat (via Section+Thumbnail, kein eigener Upload noetig, da
+    logo_url schon eine gehostete Discord-CDN-URL ist)."""
+    lines = [
+        f"### {team['name']}",
+        f"**EA-Club:** {team.get('ea_club_name') or '-'}",
+        f"**Stream:** {team.get('stream_link') or '_keiner hinterlegt_'}",
+        f"**Vereinsmanager:** {f'<@{owner_id}>' if owner_id else '_unbekannt_'}",
+        f"**Co-Manager:** {', '.join(f'<@{cid}>' for cid in comanager_ids) if comanager_ids else '-'}",
+    ]
+    if history:
+        lines.append("**Turniere:**")
+        lines += history
+    text = discord.ui.TextDisplay("\n".join(lines))
+    if team.get("logo_url"):
+        return discord.ui.Section(text, accessory=discord.ui.Thumbnail(media=team["logo_url"]))
+    return text
+
+
+class TeamOverviewSearchModal(discord.ui.Modal, title="Team suchen"):
+    query = discord.ui.TextInput(label="Team-Name (auch Teilstring reicht)", max_length=60)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        pool = get_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM teams WHERE guild_id = $1 AND dissolved_at IS NULL AND name ILIKE $2 ORDER BY name LIMIT 10",
+            interaction.guild_id, f"%{self.query.value}%",
+        )
+        if not rows:
+            await interaction.response.send_message(
+                view=warning_embed(f'Kein Team gefunden, das zu "{self.query.value}" passt.'), ephemeral=True
+            )
+            return
+
+        blocks: list[discord.ui.Item] = [discord.ui.TextDisplay(f'### 🔍 Treffer für "{self.query.value}"')]
+        for team in rows:
+            team = dict(team)
+            managers = await get_team_managers(team["id"])
+            owner_id = next((m["discord_id"] for m in managers if m["role"] == "owner"), None)
+            comanager_ids = [m["discord_id"] for m in managers if m["role"] != "owner"]
+            history = await get_team_tournament_history(pool, team["id"])
+            blocks.append(discord.ui.Separator())
+            blocks.append(build_team_block(team, owner_id, comanager_ids, history))
+
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(*blocks, accent_color=discord.Color.gold()))
+        await interaction.response.send_message(view=view, ephemeral=True)
+
+
 async def refresh_team_overview(bot: commands.Bot, guild: discord.Guild):
     """Baut die Vereins-Uebersicht komplett neu auf und postet sie frisch (statt zu editieren, da sich
     die Anzahl benoetigter Nachrichten je nach Teamzahl aendert)."""
@@ -292,7 +342,7 @@ async def refresh_team_overview(bot: commands.Bot, guild: discord.Guild):
         except discord.HTTPException:
             pass
 
-    teams = await pool.fetch("SELECT * FROM teams WHERE guild_id = $1 ORDER BY name", guild.id)
+    teams = await pool.fetch("SELECT * FROM teams WHERE guild_id = $1 AND dissolved_at IS NULL ORDER BY name", guild.id)
     now_ts = int(discord.utils.utcnow().timestamp())
 
     if not teams:
@@ -322,23 +372,13 @@ async def refresh_team_overview(bot: commands.Bot, guild: discord.Guild):
             owner_id = next((m["discord_id"] for m in managers if m["role"] == "owner"), None)
             comanager_ids = [m["discord_id"] for m in managers if m["role"] != "owner"]
             history = await get_team_tournament_history(pool, team["id"])
-
-            lines = [
-                f"### {team['name']}",
-                f"**EA-Club:** {team.get('ea_club_name') or '-'}",
-                f"**Stream:** {team.get('stream_link') or '_keiner hinterlegt_'}",
-                f"**Vereinsmanager:** {f'<@{owner_id}>' if owner_id else '_unbekannt_'}",
-                f"**Co-Manager:** {', '.join(f'<@{cid}>' for cid in comanager_ids) if comanager_ids else '-'}",
-            ]
-            if history:
-                lines.append("**Turniere:**")
-                lines += history
-            blocks.append(discord.ui.TextDisplay("\n".join(lines)))
+            blocks.append(build_team_block(dict(team), owner_id, comanager_ids, history))
             if i < len(chunk) - 1:
                 blocks.append(discord.ui.Separator())
         if idx == len(chunks) - 1:
             blocks.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
             blocks.append(discord.ui.ActionRow(
+                discord.ui.Button(label="🔍 Team suchen", style=discord.ButtonStyle.secondary, custom_id="team:overviewsearch"),
                 discord.ui.Button(label="🌐 Alle Teams auf der Website", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/teams"),
             ))
             blocks.append(discord.ui.TextDisplay(f"-# Stand: <t:{now_ts}:R>"))
@@ -1158,6 +1198,10 @@ class TeamManagerCog(commands.Cog):
 
         if action == "create":
             await interaction.response.send_modal(CreateTeamModal())
+            return
+
+        if action == "overviewsearch":
+            await interaction.response.send_modal(TeamOverviewSearchModal())
             return
 
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
