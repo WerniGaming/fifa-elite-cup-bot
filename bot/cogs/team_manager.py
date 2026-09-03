@@ -794,7 +794,14 @@ async def dissolve_team_by_admin(bot: commands.Bot, guild: discord.Guild, team: 
     from cogs.moderation import withdraw_team_from_open_tournaments
     await withdraw_team_from_open_tournaments(bot, team["id"], team["name"])
 
-    await pool.execute("DELETE FROM teams WHERE id = $1", team["id"])
+    # Team NICHT hart loeschen - schlaegt bei bereits gespielten Matches mit einem
+    # Fremdschluessel-Fehler fehl (tournament_matches referenziert team1_id/team2_id)
+    # und wuerde die Spielhistorie/Statistiken zerstoeren. Stattdessen als aufgeloest
+    # markieren und alle Manager-Zuordnungen entfernen - macht das Team fuer alle
+    # praktischen Zwecke (Turnier-Anmeldung, Team-Manager-Panel) inaktiv, behaelt
+    # aber Name/Logo/Historie fuer Turnierstatistiken und Hall of Fame.
+    await pool.execute("UPDATE teams SET dissolved_at = now() WHERE id = $1", team["id"])
+    await pool.execute("DELETE FROM team_managers WHERE team_id = $1", team["id"])
     from audit import log_action
     detail = f"durch Admin aufgelöst" + (f" - Grund: {reason}" if reason else "")
     await log_action(guild.id, actor, "team.deleted", "team", team["id"], f"{team['name']} ({detail})")

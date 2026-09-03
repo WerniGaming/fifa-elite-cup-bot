@@ -1595,7 +1595,9 @@ class AdminPanelCog(commands.Cog):
 
         elif action == "teammanager":
             pool = get_pool()
-            teams = await pool.fetch("SELECT * FROM teams WHERE guild_id = $1 ORDER BY name", interaction.guild_id)
+            teams = await pool.fetch(
+                "SELECT * FROM teams WHERE guild_id = $1 AND dissolved_at IS NULL ORDER BY name", interaction.guild_id
+            )
             if not teams:
                 await interaction.response.send_message(view=error_embed("Noch keine Teams auf diesem Server."), ephemeral=True)
                 return

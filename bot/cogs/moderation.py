@@ -100,7 +100,9 @@ async def get_all_team_bans(guild_id: int) -> list[dict]:
 
 async def get_all_guild_teams(guild_id: int) -> list[dict]:
     pool = get_pool()
-    rows = await pool.fetch("SELECT id, name FROM teams WHERE guild_id = $1 ORDER BY name", guild_id)
+    rows = await pool.fetch(
+        "SELECT id, name FROM teams WHERE guild_id = $1 AND dissolved_at IS NULL ORDER BY name", guild_id
+    )
     return [dict(r) for r in rows]
 
 
