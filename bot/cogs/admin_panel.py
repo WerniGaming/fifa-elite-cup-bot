@@ -52,6 +52,7 @@ from cogs.moderation import (
 )
 from cogs.team_manager import (
     get_team_managers, EditFieldModal, LogoUploadModal, CoManagerView, is_valid_twitch_link, apply_team_nickname,
+    dissolve_team_by_admin,
 )
 from permissions import is_tournament_admin
 from cogs.embed_builder import EmbedBuilderModal
@@ -544,6 +545,26 @@ class AdminTeamEditView(discord.ui.View):
         await interaction.response.send_message(
             content=f"**Aktuelle Manager von {self.team['name']}:**\n" + "\n".join(lines),
             view=CoManagerView(self.team),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Team auflösen", style=discord.ButtonStyle.danger, row=1)
+    async def dissolve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DissolveTeamModal(self.team))
+
+
+class DissolveTeamModal(discord.ui.Modal):
+    reason = discord.ui.TextInput(label="Grund (optional, wird per DM mitgeteilt)", required=False, max_length=200)
+
+    def __init__(self, team: dict):
+        super().__init__(title=f"Team auflösen: {team['name']}"[:45])
+        self.team = team
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await dissolve_team_by_admin(interaction.client, interaction.guild, self.team, interaction.user, self.reason.value or None)
+        await interaction.followup.send(
+            view=success_embed(f"Team {self.team['name']} wurde aufgelöst", "Alle Manager wurden per DM benachrichtigt."),
             ephemeral=True,
         )
 

@@ -783,6 +783,43 @@ class LeaveConfirmView(discord.ui.View):
         await interaction.response.edit_message(content="Abgebrochen.", view=None)
 
 
+async def dissolve_team_by_admin(bot: commands.Bot, guild: discord.Guild, team: dict, actor: discord.abc.User, reason: str | None = None):
+    """Loest ein Team administrativ auf (Admin-Panel) - wie das Selbst-Loeschen durch den
+    Owner (Team-Manager-Panel -> Verlassen/Loeschen), aber vom Admin ausgeloest, zieht das
+    Team zusaetzlich aus allen noch offenen Turnier-Anmeldungen zurueck und benachrichtigt
+    alle Manager per DM."""
+    pool = get_pool()
+    managers = await get_team_managers(team["id"])
+
+    from cogs.moderation import withdraw_team_from_open_tournaments
+    await withdraw_team_from_open_tournaments(bot, team["id"], team["name"])
+
+    await pool.execute("DELETE FROM teams WHERE id = $1", team["id"])
+    from audit import log_action
+    detail = f"durch Admin aufgelöst" + (f" - Grund: {reason}" if reason else "")
+    await log_action(guild.id, actor, "team.deleted", "team", team["id"], f"{team['name']} ({detail})")
+
+    dm_text = f"🚫 Dein Team **{team['name']}** wurde von der Turnierleitung aufgelöst."
+    if reason:
+        dm_text += f"\n**Grund:** {reason}"
+
+    for m in managers:
+        member = guild.get_member(m["discord_id"])
+        if member:
+            role_column = "vm_role_id" if m["role"] == "owner" else "co_manager_role_id"
+            await _toggle_configured_role(guild, member, role_column, grant=False)
+            await reset_team_nickname(member)
+        try:
+            user = member or await bot.fetch_user(m["discord_id"])
+            await user.send(dm_text)
+        except discord.HTTPException:
+            pass
+
+    if team.get("stream_link"):
+        await refresh_stream_list(bot, guild)
+    await refresh_team_overview(bot, guild)
+
+
 # ---------- Persistentes Hauptpanel (Components V2) ----------
 
 class TeamManagerPanel(discord.ui.LayoutView):
