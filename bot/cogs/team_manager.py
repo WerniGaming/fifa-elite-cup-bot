@@ -754,7 +754,17 @@ class LeaveConfirmView(discord.ui.View):
             # Team wird komplett geloescht - Rolle/Nickname bei ALLEN Managern (Owner + Co-Manager)
             # zuruecksetzen, nicht nur beim Owner der gerade klickt.
             managers = await get_team_managers(self.team["id"])
-            await pool.execute("DELETE FROM teams WHERE id = $1", self.team["id"])
+
+            from cogs.moderation import withdraw_team_from_open_tournaments
+            await withdraw_team_from_open_tournaments(interaction.client, self.team["id"], self.team["name"])
+
+            # Team NICHT hart loeschen - schlaegt bei bereits gespielten Matches mit einem
+            # Fremdschluessel-Fehler fehl (tournament_matches referenziert team1_id/team2_id).
+            # Das war bisher der Grund fuer "Interaktion fehlgeschlagen"/keine Bot-Antwort:
+            # die Exception flog hier, BEVOR ueberhaupt geantwortet wurde. Stattdessen wie bei
+            # der Admin-Aufloesung als aufgeloest markieren statt hart zu loeschen.
+            await pool.execute("UPDATE teams SET dissolved_at = now() WHERE id = $1", self.team["id"])
+            await pool.execute("DELETE FROM team_managers WHERE team_id = $1", self.team["id"])
             from audit import log_action
             await log_action(interaction.guild_id, interaction.user, "team.deleted", "team", self.team["id"], self.team["name"])
             for m in managers:
