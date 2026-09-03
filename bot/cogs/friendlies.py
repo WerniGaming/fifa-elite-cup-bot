@@ -23,7 +23,7 @@ from discord.ext import commands
 
 from db import get_pool
 from ui_helpers import error_embed
-from cogs.team_manager import get_team_for_user
+from cogs.team_manager import get_team_for_user, get_team_managers
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 FRIENDLY_BANNER_PATH = os.path.join(ASSETS_DIR, "friendly_banner.jpg")
@@ -256,20 +256,38 @@ class MyRequestsView(discord.ui.View):
             other_candidates = await pool.fetch(
                 "SELECT * FROM friendly_candidates WHERE slot_id = $1 AND team_id != $2", slot_id, team_id
             )
-            dm_text = (
+
+            # Nicht nur die beiden klickenden Personen benachrichtigen, sondern ALLE
+            # Vereinsmanager + Co-Manager beider Teams - jeder bekommt die komplette
+            # Kontaktliste der Gegenseite, damit egal wer sich meldet direkt klar ist,
+            # wen man anschreiben kann.
+            requester_managers = await get_team_managers(request["team_id"])
+            chosen_managers = await get_team_managers(team_id)
+
+            def contact_list(managers: list[dict]) -> str:
+                return "\n".join(
+                    f"- <@{m['discord_id']}> ({'Vereinsmanager' if m['role'] == 'owner' else 'Co-Manager'})"
+                    for m in managers
+                )
+
+            header = (
                 f"🤝 **Freundschaftsspiel vereinbart!**\n"
                 f"**{requester_team['name']}** 🆚 **{chosen_team['name']}**\n"
-                f"🗓️ {slot['proposed_time']}\n\nSprecht die Details (Uhrzeit, Plattform, Format) am besten direkt hier ab."
+                f"🗓️ {slot['proposed_time']}\n\nSprecht die Details (Uhrzeit, Plattform, Format) direkt mit dem Gegner ab."
             )
-            targets = [(request["requested_by_discord_id"], chosen_team["name"])]
-            if candidate:
-                targets.append((candidate["discord_id"], requester_team["name"]))
-            for user_id, other_name in targets:
+            for m in requester_managers:
                 try:
-                    user = interaction.guild.get_member(user_id) or await interaction.client.fetch_user(user_id)
-                    await user.send(dm_text + f"\nGegner: **{other_name}**")
+                    user = interaction.guild.get_member(m["discord_id"]) or await interaction.client.fetch_user(m["discord_id"])
+                    await user.send(header + f"\n\n**Ansprechpartner bei {chosen_team['name']}:**\n{contact_list(chosen_managers)}")
                 except discord.HTTPException:
                     pass
+            for m in chosen_managers:
+                try:
+                    user = interaction.guild.get_member(m["discord_id"]) or await interaction.client.fetch_user(m["discord_id"])
+                    await user.send(header + f"\n\n**Ansprechpartner bei {requester_team['name']}:**\n{contact_list(requester_managers)}")
+                except discord.HTTPException:
+                    pass
+
             for oc in other_candidates:
                 try:
                     user = interaction.guild.get_member(oc["discord_id"]) or await interaction.client.fetch_user(oc["discord_id"])
