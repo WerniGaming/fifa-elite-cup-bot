@@ -1246,9 +1246,12 @@ async def build_bracket_schedule_file(tournament_id: int, bracket: str) -> disco
         return None
     label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
     # Spiel um Platz 3 gehoert nicht in den Hauptbaum (spielt zwischen den Halbfinal-Verlierern,
-    # nicht dem Finalgewinner) - wuerde die Baum-Verbindungslinien verfaelschen, deshalb raus.
+    # nicht dem Finalgewinner) - wuerde die Baum-Verbindungslinien verfaelschen. Wird stattdessen
+    # separat unten drangehaengt, damit es trotzdem sichtbar in der Grafik steht.
     tree_sections = [s for s in sections if s[0] != "Spiel um Platz 3"]
-    buf = await render_bracket_tree_image(label, tree_sections)
+    third_place_section = next((s for s in sections if s[0] == "Spiel um Platz 3"), None)
+    third_place_match = third_place_section[1][0] if third_place_section and third_place_section[1] else None
+    buf = await render_bracket_tree_image(label, tree_sections, third_place=third_place_match)
     return discord.File(buf, filename="bracket.png")
 
 

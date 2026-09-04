@@ -528,12 +528,18 @@ async def render_club_stats_card(
     return buf
 
 
-async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[dict]]]) -> io.BytesIO:
+async def render_bracket_tree_image(
+    title: str, sections: list[tuple[str, list[dict]]], third_place: dict | None = None
+) -> io.BytesIO:
     """
     Echter Turnierbaum fuer die KO-Phase: eine Spalte pro Runde, Spiele als kompakte
     Karten, mit Verbindungslinien zur naechsten Runde (klassische Bracket-Optik, wie
     die Baum-Ansicht auf der Website). Nimmt dieselbe sections-Struktur wie
     render_schedule_image (Liste von (Rundenname, Matches)).
+
+    third_place (optional): das Spiel um Platz 3, separat unter der Finale-Spalte
+    gezeichnet - OHNE Verbindungslinien, da es zwischen den Halbfinal-Verlierern
+    stattfindet und die Baum-Logik (die nur Gewinner-Linien kennt) sonst verfaelschen wuerde.
     """
     sections = [s for s in sections if s[1]]
     if not sections:
@@ -592,6 +598,10 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
 
     layout_centers, layout_anchors, max_cy = compute_layout()
     height = max_cy + card_h // 2 + 30
+    third_place_top = None
+    if third_place:
+        third_place_top = height + 50  # extra Abstand zur letzten Bracket-Runde
+        height = third_place_top + card_h + 30
     width = header_h - 30 + len(sections) * (card_w + col_gap)
 
     img = Image.new("RGB", (max(width, 700), max(height, 260)), DARK_BG)
@@ -658,6 +668,12 @@ async def render_bracket_tree_image(title: str, sections: list[tuple[str, list[d
                 await draw_card(session, x, cy, m)
 
             x += card_w + col_gap
+
+        if third_place is not None and third_place_top is not None:
+            # letzte Spalte (Finale) fluchtend, aber ohne Verbindungslinien zu den anderen Runden
+            p3_x = x - (card_w + col_gap)
+            draw.text((p3_x + 4, third_place_top - 26), "Spiel um Platz 3", font=round_label_font, fill=GREY)
+            await draw_card(session, p3_x, third_place_top + card_h // 2, third_place)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
