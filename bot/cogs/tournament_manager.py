@@ -1231,20 +1231,9 @@ async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> li
         "SELECT direct_entrants FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
         tournament_id, bracket,
     )
-    has_prelim = bool(meta and meta["direct_entrants"])
-
-    sections: list[tuple[str, list[dict]]] = []
-    n = len(raw_rounds)
-    for i, round_matches in enumerate(raw_rounds):
-        if i == 0 and has_prelim:
-            # Erste Runde ist die Qualifikationsrunde der ueberzaehligen Teams (siehe create_bracket) -
-            # deren Match-Anzahl kann zufaellig mit einer spaeteren "echten" Runde kollidieren
-            # (z.B. 1 Quali-Spiel == round_name(1) == "Finale"), deshalb hier fest ueberschrieben.
-            label = "Qualifikationsrunde"
-        else:
-            offset = n - 1 - i  # 0 = Finale, 1 = Halbfinale, ...
-            label = round_name(2 ** offset)
-        sections.append((label, round_matches))
+    direct_entrants_count = len(meta["direct_entrants"]) if meta and meta["direct_entrants"] else None
+    labels = bracket_round_labels([len(r) for r in raw_rounds], direct_entrants_count)
+    sections = list(zip(labels, raw_rounds))
     if third_place:
         sections.append(("Spiel um Platz 3", third_place))
     return sections
@@ -1864,22 +1853,20 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
     names = await team_name_map(ids)
     block = [f"### {label}", ""]
 
-    # Rundennamen anhand der Position (Abstand zum Finale) statt der Match-Anzahl der
-    # jeweiligen Runde vergeben - sonst wird z.B. eine 1-Spiel-Qualifikationsrunde faelschlich
-    # als "Finale" gelabelt (round_name(1) == "Finale"). Gleiche Logik wie build_bracket_schedule_matches.
+    # Rundennamen anhand einer FESTEN Gesamtrundenzahl vergeben, nicht anhand dessen, wie viele
+    # Runden bisher in der DB angelegt sind - sonst waere die jeweils neueste Runde immer
+    # faelschlich "Finale" (siehe bracket_round_labels-Docstring).
     meta = await pool.fetchrow(
         "SELECT direct_entrants FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
         tournament_id, bracket,
     )
-    has_prelim = bool(meta and meta["direct_entrants"])
+    direct_entrants_count = len(meta["direct_entrants"]) if meta and meta["direct_entrants"] else None
     distinct_rounds = sorted({m["round"] for m in matches if not m.get("is_third_place_match")})
-    n_rounds = len(distinct_rounds)
-    round_labels = {}
-    for i, r in enumerate(distinct_rounds):
-        if i == 0 and has_prelim:
-            round_labels[r] = "Qualifikationsrunde"
-        else:
-            round_labels[r] = round_name(2 ** (n_rounds - 1 - i))
+    matches_per_round = [
+        len([mm for mm in matches if mm["round"] == r and not mm.get("is_third_place_match")])
+        for r in distinct_rounds
+    ]
+    round_labels = dict(zip(distinct_rounds, bracket_round_labels(matches_per_round, direct_entrants_count)))
 
     current_round = None
     for m in matches:
@@ -2245,6 +2232,35 @@ def round_name(num_matches: int) -> str:
         32: "Zweiunddreißigstelfinale",
     }
     return mapping.get(num_matches, f"Runde ({num_matches * 2} Teams)")
+
+
+def bracket_round_labels(matches_per_round: list[int], direct_entrants_count: int | None) -> list[str]:
+    """Rundennamen fuer ALLE bisher in der DB angelegten Runden eines Brackets, anhand einer
+    FESTEN Gesamtrundenzahl (aus der Runde-1-Groesse + evtl. Qualifikationsrunde) - nicht anhand
+    dessen, wie viele Runden bisher angelegt wurden. Eine neue Runde wird erst erzeugt, wenn die
+    vorherige komplett abgeschlossen ist - wuerde man die Anzahl bisher bekannter Runden als
+    Gesamtzahl nehmen, waere die jeweils neueste Runde immer faelschlich "Finale".
+    direct_entrants_count ist None, wenn dieses Bracket keine Qualifikationsrunde hat."""
+    if not matches_per_round:
+        return []
+    round1_count = matches_per_round[0]
+    has_prelim = direct_entrants_count is not None
+    if has_prelim:
+        # Nach der Quali-Runde (round1_count Sieger) + direct_entrants ist die Teamzahl eine
+        # saubere 2er-Potenz - daraus ergibt sich die feste Anzahl "echter" Runden danach.
+        normal_rounds_count = round(math.log2(direct_entrants_count + round1_count))
+    else:
+        normal_rounds_count = round(math.log2(round1_count * 2))
+
+    labels = []
+    for i, count in enumerate(matches_per_round):
+        if i == 0 and has_prelim:
+            labels.append("Qualifikationsrunde")
+        else:
+            pos_from_start = (i - 1) if has_prelim else i
+            offset = normal_rounds_count - 1 - pos_from_start
+            labels.append(round_name(2 ** max(offset, 0)))
+    return labels
 
 
 def format_bracket_text(matches: list[dict], names: dict[int, str], round_num: int) -> str:
