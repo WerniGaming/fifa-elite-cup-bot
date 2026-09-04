@@ -411,28 +411,53 @@ async def get_round_matches(tournament_id: int, round_num: int) -> list[dict]:
 
 async def withdraw_team_with_forfeits(bot: commands.Bot, guild: discord.Guild, tournament_id: int, team_id: int) -> int:
     """
-    Team verlaesst mitten im Turnier: ALLE noch offenen Spiele dieses Teams
-    (Gruppenphase + KO-Phase) werden automatisch 1:0 fuer den jeweiligen
-    Gegner gewertet (Def-Win). Team wird zusaetzlich als 'withdrawn' markiert,
-    damit es bei einem spaeteren KO-Phase-Start NICHT mehr fuer Winner-/Loser-
-    Bracket qualifiziert wird, egal wie seine (eingefrorene) Tabellenposition
-    aussieht. Gibt die Anzahl der betroffenen Spiele zurueck.
+    Team verlaesst mitten im Turnier. Team wird als 'withdrawn' markiert, damit es bei
+    einem spaeteren KO-Phase-Start NICHT mehr fuer Winner-/Loser-Bracket qualifiziert
+    wird, egal wie seine (eingefrorene) Tabellenposition aussieht. Gibt die Anzahl der
+    betroffenen Spiele zurueck.
+
+    Gruppenphase: ALLE Spiele dieses Teams werden 1:0-Niederlage fuer den Gegner
+    gewertet - auch bereits gespielte/gewonnene, nicht nur noch offene. Grund: die
+    Gruppentabelle ist eine reine Aggregation ohne Verzweigung, ein rueckwirkender
+    Wertungsverlust verfaelscht dort nichts weiter Nachgelagertes und verhindert, dass
+    ein spaeter aussteigendes Team seinen fruehen Sieg gegen ein anderes Team "behaelt",
+    waehrend es selbst nicht mehr zur Verantwortung gezogen werden kann.
+
+    KO-Phase: NUR noch offene (nicht gespielte) Spiele werden 1:0 fuer den Gegner
+    gewertet - der Gegner rueckt dadurch ganz normal ueber advance_tournament() in
+    die naechste Runde nach. Bereits gespielte KO-Spiele werden NICHT rueckwirkend
+    veraendert, weil davon abhaengige Folgerunden (naechste Matches) schon anhand des
+    tatsaechlichen Ergebnisses erzeugt wurden - ein nachtraeglicher Sieger-Tausch
+    wuerde den Turnierbaum strukturell zerreissen (falsche Team-Paarungen in bereits
+    bestehenden Folgerunden). Ein bereits ausgeschiedenes Team braucht ohnehin keine
+    Wertung mehr, ein bereits weitergekommenes Team verliert nur sein noch offenes
+    naechstes Spiel reell gegen den jeweiligen Gegner.
     """
     pool = get_pool()
     await pool.execute(
         "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
         tournament_id, team_id,
     )
-    open_matches = await pool.fetch(
+
+    group_matches = await pool.fetch(
         """
         SELECT * FROM tournament_matches
-        WHERE tournament_id = $1 AND status != 'completed'
+        WHERE tournament_id = $1 AND phase = 'group'
           AND (team1_id = $2 OR team2_id = $2)
         """,
         tournament_id, team_id,
     )
+    ko_matches = await pool.fetch(
+        """
+        SELECT * FROM tournament_matches
+        WHERE tournament_id = $1 AND phase = 'knockout' AND status != 'completed'
+          AND (team1_id = $2 OR team2_id = $2)
+        """,
+        tournament_id, team_id,
+    )
+
     count = 0
-    for m in open_matches:
+    for m in list(group_matches) + list(ko_matches):
         opponent_id = m["team2_id"] if m["team1_id"] == team_id else m["team1_id"]
         if opponent_id is None:
             continue  # Freilos gegen Freilos - nichts zu werten
