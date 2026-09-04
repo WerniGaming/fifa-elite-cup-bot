@@ -325,10 +325,10 @@ async def advance_tournament(tournament_id: int, current_round: int, bracket: st
             )
             if meta and meta["direct_entrants"]:
                 winners += list(meta["direct_entrants"])
-                await pool.execute(
-                    "UPDATE tournament_bracket_meta SET direct_entrants = NULL WHERE tournament_id = $1 AND bracket = $2",
-                    tournament_id, bracket,
-                )
+                # direct_entrants bewusst NICHT loeschen (round_num==1-Gate oben verhindert
+                # Doppelzaehlung in spaeteren Runden) - bracket_round_labels() braucht diesen
+                # Wert dauerhaft, um die Qualifikationsrunde auch nach ihrem Abschluss noch
+                # korrekt zu erkennen und alle folgenden Rundennamen richtig zu berechnen.
 
         if len(winners) == 1:
             return ("finished", winners[0], round_num)
