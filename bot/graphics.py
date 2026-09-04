@@ -707,6 +707,23 @@ async def render_schedule_image(title: str, sections: list[tuple[str, list[dict]
                 draw.rounded_rectangle([(26, y), (width - 26, row_bottom)], radius=12, fill=CARD_BG, outline=CARD_BORDER, width=1)
                 cy = (y + row_bottom) // 2
 
+                if m.get("status") == "bye":
+                    # Freilos: nur ein Team, mittig, mit eigenem Badge statt vs.-Pille -
+                    # vorher wurde ein Freilos-Spieltag komplett weggelassen (unsichtbar).
+                    logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])
+                    _paste_logo(img, logo1, (44, cy - logo_size // 2, 44 + logo_size, cy + logo_size // 2), label=m["team1_name"])
+                    t1_name = m["team1_name"][:22]
+                    draw.text((44 + logo_size + 16, cy - 12), t1_name, font=name_font, fill=WHITE)
+
+                    bye_text = "FREILOS"
+                    bw, bh = _text_size(draw, bye_text, score_font)
+                    pill_pad_x, pill_pad_y = 16, 8
+                    pill_box = (width - 44 - bw - pill_pad_x * 2, cy - bh / 2 - pill_pad_y, width - 44, cy + bh / 2 + pill_pad_y)
+                    draw.rounded_rectangle(pill_box, radius=14, outline=GREY, width=2)
+                    draw.text((width - 44 - bw - pill_pad_x, cy - 14), bye_text, font=score_font, fill=GREY)
+                    y += row_h
+                    continue
+
                 logo1 = await _fetch_logo(session, m.get("team1_logo_url"), m["team1_name"])
                 _paste_logo(img, logo1, (44, cy - logo_size // 2, 44 + logo_size, cy + logo_size // 2), label=m["team1_name"])
                 t1_name = m["team1_name"][:22]

@@ -1151,17 +1151,20 @@ def build_group_actions_view(group_id: int) -> discord.ui.LayoutView:
 
 
 async def build_group_schedule_matchdays(group_id: int) -> list[list[dict]]:
-    """Alle Matches einer Gruppe, nach Spieltag gruppiert, inkl. aktuellem Ergebnis (fuer die Spielplan-Grafik)."""
+    """Alle Matches einer Gruppe, nach Spieltag gruppiert, inkl. aktuellem Ergebnis (fuer die Spielplan-Grafik).
+    Bei einer ungeraden Team-Anzahl (Freilos) wird pro Spieltag zusaetzlich ein Freilos-Eintrag
+    angehaengt (status='bye') - vorher wurde das Freilos beim Spielplan-Erzeugen komplett
+    weggelassen und tauchte dadurch nirgends auf (weder Grafik noch Freigabe-Text)."""
     pool = get_pool()
     all_group_matches = await pool.fetch(
         "SELECT * FROM tournament_matches WHERE group_id = $1 ORDER BY round, match_number", group_id
     )
-    all_team_ids = {m["team1_id"] for m in all_group_matches if m["team1_id"]} | {
-        m["team2_id"] for m in all_group_matches if m["team2_id"]
-    }
-    team_rows = {tid: await get_pool_team(tid) for tid in all_team_ids}
+    roster_rows = await pool.fetch("SELECT team_id FROM tournament_group_teams WHERE group_id = $1", group_id)
+    roster = {r["team_id"] for r in roster_rows}
+    team_rows = {tid: await get_pool_team(tid) for tid in roster}
     max_matchday = max((m["round"] for m in all_group_matches), default=0)
     matchdays_data: list[list[dict]] = [[] for _ in range(max_matchday)]
+    playing_per_round: list[set[int]] = [set() for _ in range(max_matchday)]
     for m in all_group_matches:
         if m["team1_id"] is None or m["team2_id"] is None:
             continue
@@ -1172,6 +1175,16 @@ async def build_group_schedule_matchdays(group_id: int) -> list[list[dict]]:
             "team1_logo_url": t1.get("logo_url"), "team2_logo_url": t2.get("logo_url"),
             "team1_score": m["team1_score"], "team2_score": m["team2_score"], "status": m["status"],
         })
+        playing_per_round[idx] |= {m["team1_id"], m["team2_id"]}
+
+    for idx, playing in enumerate(playing_per_round):
+        for bye_team_id in roster - playing:
+            bye_team = team_rows[bye_team_id]
+            matchdays_data[idx].append({
+                "team1_name": bye_team["name"], "team2_name": None,
+                "team1_logo_url": bye_team.get("logo_url"), "team2_logo_url": None,
+                "team1_score": None, "team2_score": None, "status": "bye",
+            })
     return matchdays_data
 
 
@@ -1546,7 +1559,16 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
     matches = await pool.fetch(
         "SELECT * FROM tournament_matches WHERE group_id = $1 AND round = $2 ORDER BY match_number", group_id, matchday
     )
-    team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
+    # Freilos-Team fuer diesen Spieltag ermitteln: wer aus dem Gruppen-Kader an diesem
+    # Spieltag in KEINEM Match auftaucht. Es wird bewusst kein eigener Match-Datensatz mit
+    # team_id=NULL angelegt (wuerde die Spieltag-Fortschritts-Logik verkomplizieren), daher
+    # laesst sich das Freilos nicht aus `matches` selbst ablesen - vorher wurde es dadurch bei
+    # der Freigabe komplett uebersehen (kein Hinweis, keine DM).
+    roster_rows = await pool.fetch("SELECT team_id FROM tournament_group_teams WHERE group_id = $1", group_id)
+    playing_this_round = {tid for m in matches for tid in (m["team1_id"], m["team2_id"]) if tid is not None}
+    bye_this_round = {r["team_id"] for r in roster_rows} - playing_this_round
+
+    team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches] + list(bye_this_round)
     names = await team_name_map(team_ids)
 
     ea_names: dict[int, str] = {}
@@ -1575,6 +1597,8 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
                 f"**{names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
                 f"— EA-Club-Namen: `{ea_names.get(m['team1_id'], '?')}` vs. `{ea_names.get(m['team2_id'], '?')}`"
             )
+    for bye_team_id in bye_this_round:
+        pairing_lines.append(f"> 💤 **{names.get(bye_team_id, '?')}** hat diesen Spieltag **Freilos** - kein Spiel nötig.")
 
     view = discord.ui.LayoutView(timeout=None)
     view.add_item(discord.ui.Container(
@@ -1612,7 +1636,7 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
         except Exception:
             log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Gruppe {group_id}")
 
-    bye_team_ids = {(m["team1_id"] or m["team2_id"]) for m in matches if m["team1_id"] is None or m["team2_id"] is None}
+    bye_team_ids = bye_this_round
     home_team_ids = {m["team1_id"] for m in matches if m["team1_id"] is not None and m["team2_id"] is not None}
     involved_team_ids = {tid for tid in team_ids if tid is not None}
     t = await get_tournament(group["tournament_id"])
