@@ -1483,9 +1483,11 @@ async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, 
                 "Freilos, kein Spiel nötig."
             )
         else:
+            # Heimteam-Konvention: das zuerst genannte Team (team1) laedt ein - passend zur
+            # Regel "Heimteam laedt ein" im Cup-Regelwerk.
             pairing_lines.append(
-                f"> **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} vs. "
-                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
+                f"> 🏠 **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} lädt ein → "
+                f"**{names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
                 f"— EA-Club-Namen: `{ea_names.get(m['team1_id'], '?')}` vs. `{ea_names.get(m['team2_id'], '?')}`"
             )
 
@@ -1496,7 +1498,7 @@ async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, 
         discord.ui.TextDisplay("\n".join(pairing_lines)),
         discord.ui.Separator(),
         discord.ui.TextDisplay(
-            "-# Ihr habt **5 Minuten**, um den Gegner unter dem oben genannten EA-Club-Namen ins Spiel einzuladen."
+            "-# 🏠 = Heimteam lädt ein (unter dem oben genannten EA-Club-Namen) - ihr habt **5 Minuten** Zeit."
         ),
         accent_color=discord.Color.gold(),
     ))
@@ -1537,9 +1539,11 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
                 "Freilos, kein Spiel nötig."
             )
         else:
+            # Heimteam-Konvention: das zuerst genannte Team (team1) laedt ein - passend zur
+            # Regel "Heimteam laedt ein" im Cup-Regelwerk.
             pairing_lines.append(
-                f"> **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} vs. "
-                f"**{ea_names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
+                f"> 🏠 **{names.get(m['team1_id'], '?')}** {manager_mentions.get(m['team1_id'], '')} lädt ein → "
+                f"**{names.get(m['team2_id'], '?')}** {manager_mentions.get(m['team2_id'], '')} "
                 f"— EA-Club-Namen: `{ea_names.get(m['team1_id'], '?')}` vs. `{ea_names.get(m['team2_id'], '?')}`"
             )
 
@@ -1550,7 +1554,7 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
         discord.ui.TextDisplay("\n".join(pairing_lines)),
         discord.ui.Separator(),
         discord.ui.TextDisplay(
-            "-# Ihr habt **5 Minuten**, um den Gegner unter dem oben genannten EA-Club-Namen ins Spiel einzuladen."
+            "-# 🏠 = Heimteam lädt ein (unter dem oben genannten EA-Club-Namen) - ihr habt **5 Minuten** Zeit."
         ),
         accent_color=discord.Color.gold(),
     ))
@@ -1580,6 +1584,7 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
             log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Gruppe {group_id}")
 
     bye_team_ids = {(m["team1_id"] or m["team2_id"]) for m in matches if m["team1_id"] is None or m["team2_id"] is None}
+    home_team_ids = {m["team1_id"] for m in matches if m["team1_id"] is not None and m["team2_id"] is not None}
     involved_team_ids = {tid for tid in team_ids if tid is not None}
     t = await get_tournament(group["tournament_id"])
     for tid in involved_team_ids:
@@ -1592,10 +1597,15 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
                         f"📢 **Spieltag {matchday}** in Gruppe {group['group_number']} ({t['name']}): "
                         "ihr habt diesen Spieltag **Freilos** - kein Spiel nötig, gilt automatisch als erledigt."
                     )
+                elif tid in home_team_ids:
+                    await user.send(
+                        f"📢 **Spieltag {matchday}** in Gruppe {group['group_number']} ({t['name']}) wurde freigegeben! "
+                        "🏠 Ihr seid **Heimteam** - ladet euren Gegner jetzt ins Spiel ein, ihr habt 5 Minuten Zeit."
+                    )
                 else:
                     await user.send(
                         f"📢 **Spieltag {matchday}** in Gruppe {group['group_number']} ({t['name']}) wurde freigegeben! "
-                        "Ladet euren Gegner jetzt ins Spiel ein - ihr habt 5 Minuten Zeit."
+                        "Ihr seid **Auswärtsteam** - wartet auf die Einladung eures Gegners (Heimteam), ihr habt 5 Minuten Zeit."
                     )
             except discord.HTTPException:
                 pass
