@@ -1994,7 +1994,7 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
     }
     try:
         channel = await asyncio.wait_for(
-            guild.create_text_channel(f"{t['name'][:35]}-{bracket}-bracket", overwrites=overwrites), timeout=15
+            guild.create_text_channel("winner-bracket" if bracket == "winner" else "looser-bracket", overwrites=overwrites), timeout=15
         )
     except asyncio.TimeoutError:
         log.error(f"Timeout beim Erstellen des Kanals fuer Bracket '{bracket}' (Turnier {tournament_id})")
