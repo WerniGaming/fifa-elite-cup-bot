@@ -1083,39 +1083,18 @@ async def grant_live_tournament_access(guild: discord.Guild, team_id: int, membe
 
 async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     """
-    Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Solange nicht
-    jedes Team der Gruppe 'Team ist da' bestaetigt hat, zeigt das Panel eine
-    Check-in-Checkliste statt der Tabelle - Spieltag 1 bleibt so lange blockiert.
+    Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Zeigt Tabelle +
+    Spielplan-Grafik direkt, ohne vorherigen "Team ist da"-Aktivitaetscheck (auf
+    Owner-Wunsch entfernt - blockierte vorher Spieltag 1, bis alle bestaetigt hatten).
     Die Spielplan-Grafik wird per MediaGallery eingebettet (view.schedule_file
     muss vom Aufrufer zusaetzlich in files= mitgegeben werden).
     """
     pool = get_pool()
     group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
-    team_rows = await pool.fetch(
-        "SELECT team_id, confirmed_ready FROM tournament_group_teams WHERE group_id = $1", group_id
-    )
     view = discord.ui.LayoutView(timeout=None)
     schedule_file = await build_group_schedule_file(dict(group))
     view.schedule_file = schedule_file
     media = discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://spielplan.png"))
-    all_ready = all(tr["confirmed_ready"] for tr in team_rows) if team_rows else True
-
-    if not all_ready:
-        names = await team_name_map([tr["team_id"] for tr in team_rows])
-        lines = ["**Team-Check-in**", "_Erst wenn hier jedes Team bestätigt hat, kann Spieltag 1 freigegeben werden._", ""]
-        for tr in team_rows:
-            mark = "✅" if tr["confirmed_ready"] else "⏳"
-            lines.append(f"{mark} {names.get(tr['team_id'], '?')}")
-        container = discord.ui.Container(
-            discord.ui.TextDisplay("\n".join(lines)),
-            discord.ui.ActionRow(
-                discord.ui.Button(label="Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
-            ),
-            media,
-            accent_color=discord.Color.gold(),
-        )
-        view.add_item(container)
-        return view
 
     standings_text = await build_group_standings_text(group_id)
     container = discord.ui.Container(
