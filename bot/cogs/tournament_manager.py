@@ -2595,7 +2595,7 @@ class TournamentStreamLinkModal(discord.ui.Modal, title="Stream-Link ändern"):
             await interaction.response.send_message(
                 view=error_embed(
                     "Das ist kein gültiger Twitch-Link.",
-                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                    "Format: `https://twitch.tv/name` oder `https://www.twitch.tv/name`",
                 ),
                 ephemeral=True,
             )

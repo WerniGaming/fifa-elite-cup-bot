@@ -27,7 +27,7 @@ from ui_helpers import success_embed, error_embed, info_embed, warning_embed, WE
 log = logging.getLogger("fifa-elite-cup")
 
 PLATFORM_DEFAULT = "common-gen5"
-TWITCH_LINK_PATTERN = re.compile(r"^https://www\.twitch\.tv/[A-Za-z0-9_]+/?$")
+TWITCH_LINK_PATTERN = re.compile(r"^https://(?:www\.)?twitch\.tv/[A-Za-z0-9_]+/?$")
 
 
 def is_valid_twitch_link(value: str) -> bool:
@@ -505,7 +505,7 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             await interaction.followup.send(
                 view=error_embed(
                     "Das ist kein gültiger Twitch-Link.",
-                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                    "Format: `https://twitch.tv/name` oder `https://www.twitch.tv/name`",
                 ),
                 ephemeral=True,
             )
@@ -607,7 +607,7 @@ class EditFieldModal(discord.ui.Modal):
             await interaction.response.send_message(
                 view=error_embed(
                     "Das ist kein gültiger Twitch-Link.",
-                    "Format muss genau so aussehen: `https://www.twitch.tv/name`",
+                    "Format: `https://twitch.tv/name` oder `https://www.twitch.tv/name`",
                 ),
                 ephemeral=True,
             )
