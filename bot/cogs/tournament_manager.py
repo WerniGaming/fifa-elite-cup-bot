@@ -1227,11 +1227,23 @@ async def build_bracket_schedule_matches(tournament_id: int, bracket: str) -> li
     if current_matches:
         raw_rounds.append(current_matches)
 
+    meta = await pool.fetchrow(
+        "SELECT direct_entrants FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
+        tournament_id, bracket,
+    )
+    has_prelim = bool(meta and meta["direct_entrants"])
+
     sections: list[tuple[str, list[dict]]] = []
     n = len(raw_rounds)
     for i, round_matches in enumerate(raw_rounds):
-        offset = n - 1 - i  # 0 = Finale, 1 = Halbfinale, ...
-        label = round_name(2 ** offset)
+        if i == 0 and has_prelim:
+            # Erste Runde ist die Qualifikationsrunde der ueberzaehligen Teams (siehe create_bracket) -
+            # deren Match-Anzahl kann zufaellig mit einer spaeteren "echten" Runde kollidieren
+            # (z.B. 1 Quali-Spiel == round_name(1) == "Finale"), deshalb hier fest ueberschrieben.
+            label = "Qualifikationsrunde"
+        else:
+            offset = n - 1 - i  # 0 = Finale, 1 = Halbfinale, ...
+            label = round_name(2 ** offset)
         sections.append((label, round_matches))
     if third_place:
         sections.append(("Spiel um Platz 3", third_place))
@@ -1851,6 +1863,24 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
     ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
     names = await team_name_map(ids)
     block = [f"### {label}", ""]
+
+    # Rundennamen anhand der Position (Abstand zum Finale) statt der Match-Anzahl der
+    # jeweiligen Runde vergeben - sonst wird z.B. eine 1-Spiel-Qualifikationsrunde faelschlich
+    # als "Finale" gelabelt (round_name(1) == "Finale"). Gleiche Logik wie build_bracket_schedule_matches.
+    meta = await pool.fetchrow(
+        "SELECT direct_entrants FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
+        tournament_id, bracket,
+    )
+    has_prelim = bool(meta and meta["direct_entrants"])
+    distinct_rounds = sorted({m["round"] for m in matches if not m.get("is_third_place_match")})
+    n_rounds = len(distinct_rounds)
+    round_labels = {}
+    for i, r in enumerate(distinct_rounds):
+        if i == 0 and has_prelim:
+            round_labels[r] = "Qualifikationsrunde"
+        else:
+            round_labels[r] = round_name(2 ** (n_rounds - 1 - i))
+
     current_round = None
     for m in matches:
         if m["round"] != current_round:
@@ -1858,7 +1888,7 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
             normal_matches_in_round = [mm for mm in matches if mm["round"] == current_round and not mm.get("is_third_place_match")]
             third_place_in_round = any(mm.get("is_third_place_match") for mm in matches if mm["round"] == current_round)
             if normal_matches_in_round:
-                block.append(f"**{round_name(len(normal_matches_in_round))}**")
+                block.append(f"**{round_labels[current_round]}**")
             if third_place_in_round:
                 block.append("**Spiel um Platz 3**")
         t1 = names.get(m["team1_id"], "Freilos") if m["team1_id"] else "Freilos"
