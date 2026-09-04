@@ -47,8 +47,12 @@ from ea_api import EAProClubsAPI
 log = logging.getLogger("fifa-elite-cup")
 
 ALLOWED_BRACKET_SIZES = sorted(set(
-    [n for n in range(8, 129, 4)] +  # durch 4er-Gruppen sauber teilbar: 8,12,16,20,24,28,32...
-    [n for n in range(8, 129, 6)]    # durch 6er-Gruppen sauber teilbar: 12,18,24,30...
+    [n for n in range(8, 129, 4)] +   # durch 4er-Gruppen sauber teilbar: 8,12,16,20,24,28,32...
+    [n for n in range(12, 129, 6)]    # durch 6er-Gruppen sauber teilbar: 12,18,24,30... (Start bei 12, NICHT 8 -
+                                       # sonst entstehen krumme Werte wie 14/26/38, die zu 7er-Gruppen fuehren, weil
+                                       # group_size_for() bei "nicht durch 4 teilbar" auf 6er umschaltet, obwohl die
+                                       # Groesse selbst gar nicht sauber durch 6 teilbar ist. Live am 04.09. bei
+                                       # einem 14er-Turnier als zwei 7er-Gruppen aufgefallen.)
 ))
 
 
