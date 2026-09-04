@@ -1907,6 +1907,9 @@ async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int,
         "UPDATE tournament_bracket_meta SET panel_channel_id = $1, panel_message_id = $2 WHERE tournament_id = $3 AND bracket = $4",
         panel_channel.id, msg.id, tournament_id, bracket,
     )
+    # Spielaktionen-Buttons auch im Panel-Kanal, analog zum Gruppen-Panel - manche Manager
+    # nutzen nur den Panel-Kanal, nicht den eigentlichen Bracket-Kanal.
+    await panel_channel.send(view=build_bracket_actions_view(tournament_id, bracket))
     return panel_channel
 
 
