@@ -709,6 +709,10 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
     )
     await post_live_result(bot, guild, match, score1, score2, winner_id)
 
+    if match["team1_id"] and match["team2_id"]:
+        from cogs.stats_manager import capture_match_player_stats
+        asyncio.create_task(capture_match_player_stats(match_id, match["team1_id"], match["team2_id"]))
+
     t = await get_tournament(match["tournament_id"])
 
     if match.get("is_third_place_match"):

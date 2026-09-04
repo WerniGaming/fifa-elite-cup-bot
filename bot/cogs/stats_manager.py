@@ -105,6 +105,54 @@ async def try_fetch_ea_full_match(team1: dict, team2: dict) -> dict | None:
     return None
 
 
+async def capture_match_player_stats(match_id: int, team1_id: int, team2_id: int):
+    """Sichert die EA-Spielerdaten fuer genau EIN Match sofort nach Ergebniseintragung,
+    statt bis zum Bracket-Ende zu warten (die EA-Freundschaftsspiel-Historie ist begrenzt -
+    ohne fruehe Sicherung koennten aeltere Matches spaeter aus der API-Historie fallen).
+    Wird als Hintergrund-Task angestossen und darf den Ergebnis-Flow niemals stoeren -
+    daher werden alle Fehler hier verschluckt (nur geloggt)."""
+    try:
+        team1 = await get_pool_team(team1_id)
+        team2 = await get_pool_team(team2_id)
+        ea_match = await try_fetch_ea_full_match(team1, team2)
+        if not ea_match:
+            return
+
+        players_by_club = ea_match.get("players", {})
+        rows = []
+        for team_row, team_id in ((team1, team1_id), (team2, team2_id)):
+            club_players = players_by_club.get(str(team_row.get("ea_club_id")))
+            if not club_players:
+                continue
+            for player_id, p in club_players.items():
+                name = p.get("playername") or p.get("proName") or f"Player {player_id}"
+                raw_pos = p.get("position") or p.get("pos") or ""
+                rows.append((
+                    match_id, team_id, name,
+                    _safe_int(p.get("goals")), _safe_int(p.get("assists")),
+                    _safe_float(p.get("rating")), _safe_int(p.get("mom")), _safe_int(p.get("saves")),
+                    _position_group(raw_pos),
+                ))
+        if not rows:
+            return
+
+        pool = get_pool()
+        await pool.executemany(
+            """
+            INSERT INTO match_player_stats
+                (match_id, team_id, player_name, goals, assists, rating, mom, saves, position_group)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (match_id, team_id, player_name) DO UPDATE SET
+                goals = EXCLUDED.goals, assists = EXCLUDED.assists, rating = EXCLUDED.rating,
+                mom = EXCLUDED.mom, saves = EXCLUDED.saves, position_group = EXCLUDED.position_group
+            """,
+            rows,
+        )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(f"Fehler beim Sichern der Match-Spielerdaten fuer Match {match_id}")
+
+
 async def get_bracket_team_ids(tournament_id: int, bracket: str) -> list[int]:
     pool = get_pool()
     rows = await pool.fetch(
