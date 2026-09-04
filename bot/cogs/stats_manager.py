@@ -82,7 +82,9 @@ class PlayerAgg:
 
     @property
     def score(self) -> float:
-        return self.avg_rating * 10 + self.goals * 1.5 + self.assists * 1.0 + self.mom * 0.5
+        """Rankingwert fuer Awards/Top-11 - schlicht die Durchschnittsbewertung ueber alle
+        Matches, nicht mehr eine gewichtete Mischung aus Rating/Toren/Assists/MOM."""
+        return self.avg_rating
 
 
 async def try_fetch_ea_full_match(team1: dict, team2: dict) -> dict | None:
@@ -322,11 +324,11 @@ async def build_awards_text(bracket: str, awards: dict[str, PlayerAgg]) -> str:
         return "_Keine EA-Match-Daten gefunden._"
     team_names = await team_name_map([p.team_id for p in awards.values()])
     metric_texts = {
-        "Bester Spieler": lambda p: f"Score {p.score:.1f}",
+        "Bester Spieler": lambda p: f"⌀ {p.score:.2f}",
         "Bester Torschütze": lambda p: f"{p.goals} Tore",
         "Bester Aufleger": lambda p: f"{p.assists} Vorlagen",
-        "Bester Verteidiger": lambda p: f"Score {p.score:.1f}",
-        "Goldener Handschuh": lambda p: f"Score {p.score:.1f}",
+        "Bester Verteidiger": lambda p: f"⌀ {p.score:.2f}",
+        "Goldener Handschuh": lambda p: f"⌀ {p.score:.2f}",
     }
     lines = []
     for award_name, p in awards.items():
@@ -346,7 +348,7 @@ async def build_top11_text(top11: dict[str, list[PlayerAgg]]) -> str:
         players = top11.get(group, [])
         if not players:
             continue
-        names = "\n".join(f"{p.name} ({team_names.get(p.team_id, '?')}) — {p.score:.1f}" for p in players)
+        names = "\n".join(f"{p.name} ({team_names.get(p.team_id, '?')}) — ⌀ {p.score:.2f}" for p in players)
         blocks.append(f"**{group_labels[group]}**\n{names}")
     return "\n\n".join(blocks)
 
@@ -361,11 +363,11 @@ async def build_awards_embed(tournament_id: int, bracket: str, awards: dict[str,
 
     team_names = await team_name_map([p.team_id for p in awards.values()])
     metric_texts = {
-        "Bester Spieler": lambda p: f"Score {p.score:.1f}",
+        "Bester Spieler": lambda p: f"⌀ {p.score:.2f}",
         "Bester Torschütze": lambda p: f"{p.goals} Tore",
         "Bester Aufleger": lambda p: f"{p.assists} Vorlagen",
-        "Bester Verteidiger": lambda p: f"Score {p.score:.1f}",
-        "Goldener Handschuh": lambda p: f"Score {p.score:.1f}",
+        "Bester Verteidiger": lambda p: f"⌀ {p.score:.2f}",
+        "Goldener Handschuh": lambda p: f"⌀ {p.score:.2f}",
     }
     for award_name, p in awards.items():
         embed.add_field(
@@ -393,7 +395,7 @@ async def build_top11_embed(tournament_id: int, bracket: str, top11: dict[str, l
         players = top11.get(group, [])
         if not players:
             continue
-        value = "\n".join(f"{p.name} ({team_names.get(p.team_id, '?')}) — {p.score:.1f}" for p in players)
+        value = "\n".join(f"{p.name} ({team_names.get(p.team_id, '?')}) — ⌀ {p.score:.2f}" for p in players)
         embed.add_field(name=group_labels[group], value=value, inline=False)
     return embed
 
@@ -415,11 +417,11 @@ async def build_awards_image(tournament_id: int, bracket: str, awards: dict[str,
     team_names = await team_name_map([p.team_id for p in awards.values()])
     team_logos = await team_logo_map([p.team_id for p in awards.values()])
     metric_texts = {
-        "Bester Spieler": lambda p: f"Score {p.score:.1f}",
+        "Bester Spieler": lambda p: f"⌀ {p.score:.2f}",
         "Bester Torschütze": lambda p: f"{p.goals} Tore",
         "Bester Aufleger": lambda p: f"{p.assists} Vorlagen",
-        "Bester Verteidiger": lambda p: f"Score {p.score:.1f}",
-        "Goldener Handschuh": lambda p: f"Score {p.score:.1f}",
+        "Bester Verteidiger": lambda p: f"⌀ {p.score:.2f}",
+        "Goldener Handschuh": lambda p: f"⌀ {p.score:.2f}",
     }
     entries = [
         (award_name, p.name, team_names.get(p.team_id, "?"), metric_texts[award_name](p), team_logos.get(p.team_id))
