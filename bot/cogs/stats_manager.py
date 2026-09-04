@@ -189,63 +189,50 @@ async def get_matches_for_teams(tournament_id: int, team_ids: list[int]) -> list
 
 async def aggregate_bracket_stats(tournament_id: int, bracket: str) -> tuple[dict[str, PlayerAgg], int, int]:
     """
-    Holt fuer alle Teams eines Brackets (Winner/Loser) die kompletten Turnier-Matches
-    (Gruppenphase + KO), zieht die echten EA-Spielerdaten und aggregiert sie.
-    Gibt (Aggregation, gefundene_Matches, Matches_gesamt) zurueck.
+    Aggregiert die Spielerdaten aller Teams eines Brackets (Winner/Loser) ueber die komplette
+    Turnierhistorie (Gruppenphase + KO) - aus den bereits pro Match gesicherten EA-Daten
+    (match_player_stats, siehe capture_match_player_stats), NICHT durch einen erneuten
+    Live-Abruf bei der EA-API. Gibt (Aggregation, gefundene_Matches, Matches_gesamt) zurueck.
+
+    Frueher wurde hier live bei der EA-API nachgefragt UND dabei nach Team-Paar dedupliziert -
+    das ging schief, sobald zwei Teams sich zweimal begegneten (z.B. Gruppenphase UND KO gegen
+    denselben Gegner): die zweite Begegnung wurde faelschlich als "schon gesehenes Paar"
+    uebersprungen, obwohl es ein komplett anderes Match war. Ueber match_player_stats (ein
+    Eintrag pro echter Match-ID) kann das nicht mehr passieren.
     """
+    pool = get_pool()
     team_ids = await get_bracket_team_ids(tournament_id, bracket)
     team_ids_set = set(team_ids)
     matches = await get_matches_for_teams(tournament_id, team_ids)
 
-    team_cache: dict[int, dict] = {}
     agg: dict[str, PlayerAgg] = {}
-    checked_pairs = set()
     found_count = 0
-    total_count = 0
+    total_count = len(matches)
 
     for m in matches:
-        t1_id, t2_id = m["team1_id"], m["team2_id"]
-        pair_key = tuple(sorted([t1_id, t2_id]))
-        if pair_key in checked_pairs:
-            continue
-        checked_pairs.add(pair_key)
-        total_count += 1
-
-        if t1_id not in team_cache:
-            team_cache[t1_id] = await get_pool_team(t1_id)
-        if t2_id not in team_cache:
-            team_cache[t2_id] = await get_pool_team(t2_id)
-        team1, team2 = team_cache[t1_id], team_cache[t2_id]
-
-        ea_match = await try_fetch_ea_full_match(team1, team2)
-        if not ea_match:
+        rows = await pool.fetch("SELECT * FROM match_player_stats WHERE match_id = $1", m["id"])
+        if not rows:
             continue
         found_count += 1
 
-        players_by_club = ea_match.get("players", {})
-        for team_row, team_id in ((team1, t1_id), (team2, t2_id)):
+        for r in rows:
+            team_id = r["team_id"]
             # Gruppenspiele sind immer bracket='winner' getaggt, auch wenn der Gegner
             # spaeter ins Loser-Bracket eingeteilt wird - hier den Gegner ausschliessen,
             # sonst tauchen Loser-Bracket-Spieler in der Winner-Bracket-Auswertung auf.
             if team_id not in team_ids_set:
                 continue
-            club_players = players_by_club.get(str(team_row.get("ea_club_id")))
-            if not club_players:
-                continue
-            for player_id, p in club_players.items():
-                key = f"{team_id}:{player_id}"
-                name = p.get("playername") or p.get("proName") or f"Player {player_id}"
-                if key not in agg:
-                    agg[key] = PlayerAgg(name=name, team_id=team_id)
-                entry = agg[key]
-                entry.matches += 1
-                entry.total_rating += _safe_float(p.get("rating"))
-                entry.goals += _safe_int(p.get("goals"))
-                entry.assists += _safe_int(p.get("assists"))
-                entry.mom += _safe_int(p.get("mom"))
-                entry.saves += _safe_int(p.get("saves"))
-                raw_pos = p.get("position") or p.get("pos") or ""
-                entry.positions[_position_group(raw_pos)] += 1
+            key = f"{team_id}:{r['player_name']}"
+            if key not in agg:
+                agg[key] = PlayerAgg(name=r["player_name"], team_id=team_id)
+            entry = agg[key]
+            entry.matches += 1
+            entry.total_rating += float(r["rating"])
+            entry.goals += r["goals"]
+            entry.assists += r["assists"]
+            entry.mom += r["mom"]
+            entry.saves += r["saves"]
+            entry.positions[r["position_group"]] += 1
 
     return agg, found_count, total_count
 
