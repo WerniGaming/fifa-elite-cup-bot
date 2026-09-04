@@ -617,7 +617,10 @@ class EditFieldModal(discord.ui.Modal):
         await interaction.response.send_message(view=success_embed("Aktualisiert."), ephemeral=True)
         if self.field == "stream_link":
             await refresh_stream_list(interaction.client, interaction.guild)
-            await refresh_team_overview(interaction.client, interaction.guild)
+        # Vereins-Uebersicht zeigt auch EA-Club-Name/Stream etc. an - bisher wurde sie nur
+        # beim Stream-Link aktualisiert, wodurch z.B. ein geaenderter EA-Club-Name dort stehen
+        # blieb, obwohl die DB laengst den neuen Wert hatte (live gemeldet: "Calcio Strada").
+        await refresh_team_overview(interaction.client, interaction.guild)
 
 
 class TeamRenameModal(discord.ui.Modal, title="Team umbenennen"):
