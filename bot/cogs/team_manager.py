@@ -639,7 +639,9 @@ class TeamRenameModal(discord.ui.Modal, title="Team umbenennen"):
         await interaction.response.defer(ephemeral=True, thinking=True)
         pool = get_pool()
         try:
-            await pool.execute("UPDATE teams SET name = $1 WHERE id = $2", new_name, self.team_id)
+            # Team-Name und EA-Club-Name sollen immer identisch sein - Umbenennen setzt
+            # deshalb beide zusammen, statt nur den Discord-Anzeigenamen zu aendern.
+            await pool.execute("UPDATE teams SET name = $1, ea_club_name = $1 WHERE id = $2", new_name, self.team_id)
         except asyncpg.UniqueViolationError:
             await interaction.followup.send(
                 view=error_embed(f'Ein Team namens "{new_name}" existiert auf diesem Server bereits.'), ephemeral=True
