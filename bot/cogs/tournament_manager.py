@@ -2149,7 +2149,11 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     loser_seeds: list[dict] = []
     for g in standings:
         eligible = [s for s in g["standings"] if s["team_id"] not in withdrawn_team_ids]
-        winner_n = len(g["standings"]) // 2  # 4er-Gruppe -> 2, 6er-Gruppe -> 3 (Sollgroesse bleibt gleich)
+        # Aufrunden statt abrunden: bei einer durch Freilos entstandenen 3er-Gruppe (Sollgroesse
+        # eigentlich 4) gehen so trotzdem 2 Teams weiter statt nur 1 (3 // 2 = 1 wuerde die
+        # Gruppenzweiten dort schlechter stellen als Gruppendritte in vollen 4er-Gruppen). Bei
+        # sauberen 4er/6er-Gruppen aendert sich dadurch nichts (4+1)//2=2, (6+1)//2=3.
+        winner_n = (len(g["standings"]) + 1) // 2
         for tier, s in enumerate(eligible[:winner_n]):
             winner_seeds.append({**s, "tier": tier})
         for tier, s in enumerate(eligible[winner_n:]):
