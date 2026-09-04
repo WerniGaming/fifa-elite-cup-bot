@@ -1314,7 +1314,7 @@ class AdminPanel(discord.ui.LayoutView):
         media_items = []
         if os.path.exists(ADMIN_BANNER_PATH):
             self.banner_file = discord.File(ADMIN_BANNER_PATH, filename="admin_banner.jpg")
-            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://admin_banner.jpg")))
         container = discord.ui.Container(
             *media_items,
             intro,

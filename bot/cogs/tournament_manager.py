@@ -777,7 +777,7 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
                 discord.ui.TextDisplay(f"# 🏆 {bracket_label} Champion\n{t_row['name']}"),
                 discord.ui.Separator(),
                 discord.ui.TextDisplay(podium_text),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(media=podium_file)),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://podium.png")),
                 accent_color=discord.Color.gold(),
             ))
             await bracket_channel.send(view=view, files=[podium_file])
@@ -1097,7 +1097,7 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     view = discord.ui.LayoutView(timeout=None)
     schedule_file = await build_group_schedule_file(dict(group))
     view.schedule_file = schedule_file
-    media = discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file))
+    media = discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://spielplan.png"))
     all_ready = all(tr["confirmed_ready"] for tr in team_rows) if team_rows else True
 
     if not all_ready:
@@ -1605,7 +1605,7 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
             schedule_view = discord.ui.LayoutView(timeout=None)
             schedule_view.add_item(discord.ui.Container(
                 discord.ui.TextDisplay(f"### 📋 Aktueller Spielplan — Gruppe {group['group_number']}"),
-                discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file)),
+                discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://spielplan.png")),
                 accent_color=discord.Color.gold(),
             ))
             await channel.send(view=schedule_view, files=[schedule_file])
@@ -1852,7 +1852,7 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
     schedule_file = await build_bracket_schedule_file(tournament_id, bracket)
     view.schedule_file = schedule_file
     if schedule_file:
-        items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=schedule_file)))
+        items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://bracket.png")))
     view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
     return view
 
@@ -2325,7 +2325,7 @@ class TournamentPanel(discord.ui.LayoutView):
         items = []
         if os.path.exists(TOURNAMENT_BANNER_PATH):
             self.banner_file = discord.File(TOURNAMENT_BANNER_PATH, filename="tournament_banner.jpg")
-            items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+            items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://tournament_banner.jpg")))
         items.append(header_block)
         if schedule_block:
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))

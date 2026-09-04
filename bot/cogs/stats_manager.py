@@ -406,7 +406,7 @@ def build_stat_image_view(title_text: str, file_obj: discord.File, body_text: st
     if body_text:
         items.append(discord.ui.Separator())
         items.append(discord.ui.TextDisplay(body_text))
-    items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=file_obj)))
+    items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=f"attachment://{file_obj.filename}")))
     items.append(discord.ui.ActionRow(
         discord.ui.Button(label="🌐 Mehr Statistiken auf der Website", style=discord.ButtonStyle.link, url=f"{WEBSITE_URL}/stats"),
     ))

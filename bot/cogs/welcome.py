@@ -55,7 +55,7 @@ class WelcomePanel(discord.ui.LayoutView):
         media_items = []
         if os.path.exists(BANNER_PATH):
             self.banner_file = discord.File(BANNER_PATH, filename="welcome_banner.jpg")
-            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://welcome_banner.jpg")))
 
         container = discord.ui.Container(
             *media_items,

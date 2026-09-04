@@ -68,7 +68,7 @@ class TicketPanel(discord.ui.LayoutView):
         media_items = []
         if os.path.exists(BANNER_PATH):
             self.banner_file = discord.File(BANNER_PATH, filename="ticket_banner.jpg")
-            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=self.banner_file)))
+            media_items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://ticket_banner.jpg")))
 
         container = discord.ui.Container(
             *media_items,
