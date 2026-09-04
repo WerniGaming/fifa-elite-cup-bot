@@ -1345,6 +1345,7 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
     header = f"# 📅 LIVE-SPIELPLAN\n## {t['name']}"
 
     items: list = [discord.ui.TextDisplay(header)]
+    schedule_files: list[discord.File] = []
 
     standings = await get_group_standings(tournament_id)
     if standings:
@@ -1393,9 +1394,21 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
                     )
 
             items.append(discord.ui.TextDisplay("\n".join(block)))
+
+            # Zusaetzlich zur Text-Zusammenfassung auch die Spielplan-Grafik einbetten (gleiche
+            # Optik wie im Gruppen-Panel-Kanal) - bisher gab's waehrend der Gruppenphase im
+            # Live-Spielplan-Kanal nur Text, keine Grafiken.
+            group_row = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", g["group_id"])
+            if group_row:
+                schedule_filename = f"group_{g['group_number']}_schedule.png"
+                schedule_file = await build_group_schedule_file(dict(group_row))
+                schedule_file.filename = schedule_filename
+                schedule_files.append(schedule_file)
+                items.append(discord.ui.MediaGallery(discord.MediaGalleryItem(media=f"attachment://{schedule_filename}")))
+
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
 
-    bracket_files: list[discord.File] = []
+    bracket_files: list[discord.File] = list(schedule_files)
     for bracket, label, icon in (("winner", "Winner Bracket", "🏆"), ("loser", "Loser Bracket", "🥊")):
         sections = await build_bracket_schedule_matches(tournament_id, bracket)
         if not sections:
