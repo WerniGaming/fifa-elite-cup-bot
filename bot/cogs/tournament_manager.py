@@ -711,7 +711,7 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
 
     if match["team1_id"] and match["team2_id"]:
         from cogs.stats_manager import capture_match_player_stats
-        asyncio.create_task(capture_match_player_stats(match_id, match["team1_id"], match["team2_id"]))
+        asyncio.create_task(capture_match_player_stats(match_id, match["team1_id"], match["team2_id"], score1, score2))
 
     t = await get_tournament(match["tournament_id"])
 
@@ -1255,6 +1255,20 @@ async def build_bracket_schedule_file(tournament_id: int, bracket: str) -> disco
     return discord.File(buf, filename="bracket.png")
 
 
+async def apply_staff_overwrites(guild: discord.Guild, overwrites: dict) -> dict:
+    """Fuegt allen konfigurierten Cup-Staff-Rollen (Trial Moderator, Moderator, Head Moderator, ...)
+    automatisch Sichtbarkeit fuer diesen Kanal hinzu, ohne dass man sie manuell pro Kanal
+    ergaenzen muss - gilt fuer alle Cup-Kanaele (Gruppen, Panels, Bracket-Kanaele)."""
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT cup_staff_role_ids FROM guild_settings WHERE guild_id = $1", guild.id)
+    role_ids = row["cup_staff_role_ids"] if row and row["cup_staff_role_ids"] else []
+    for rid in role_ids:
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True)
+    return overwrites
+
+
 async def create_group_panel_channel(guild: discord.Guild, category: discord.CategoryChannel, group: dict) -> discord.TextChannel:
     """
     Legt einen eigenen 'nur Panel'-Kanal fuer eine Gruppe an (z.B. 'gruppe-1-panel'),
@@ -1269,6 +1283,7 @@ async def create_group_panel_channel(guild: discord.Guild, category: discord.Cat
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
     if role:
         overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
+    overwrites = await apply_staff_overwrites(guild, overwrites)
 
     panel_channel = await guild.create_text_channel(
         f"gruppe-{group['group_number']}-panel", category=category, overwrites=overwrites
@@ -1709,7 +1724,8 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
     for i, tid in enumerate(team_ids):
         groups[i % num_groups].append(tid)
 
-    category = await guild.create_category(f"{t['name']} Gruppenphase"[:100])
+    category_overwrites = await apply_staff_overwrites(guild, {})
+    category = await guild.create_category(f"{t['name']} Gruppenphase"[:100], overwrites=category_overwrites)
     await pool.execute("UPDATE tournaments SET group_category_id = $1 WHERE id = $2", category.id, tournament_id)
     match_number = 1
     new_group_ids = []
@@ -1738,6 +1754,7 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
+        overwrites = await apply_staff_overwrites(guild, overwrites)
         channel = await guild.create_text_channel(f"gruppe-{idx}", category=category, overwrites=overwrites)
 
         row = await pool.fetchrow(
@@ -1902,6 +1919,7 @@ async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int,
     pool = get_pool()
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
     overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
+    overwrites = await apply_staff_overwrites(guild, overwrites)
 
     panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], overwrites=overwrites)
     panel = await build_bracket_panel_view(tournament_id, bracket)
@@ -1992,6 +2010,7 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
+    overwrites = await apply_staff_overwrites(guild, overwrites)
     try:
         channel = await asyncio.wait_for(
             guild.create_text_channel("winner-bracket" if bracket == "winner" else "looser-bracket", overwrites=overwrites), timeout=15

@@ -87,8 +87,19 @@ class PlayerAgg:
         return self.avg_rating
 
 
-async def try_fetch_ea_full_match(team1: dict, team2: dict) -> dict | None:
-    """Sucht in den letzten 20 Freundschaftsspielen von Team1 das Match gegen Team2, gibt das volle Match-Objekt zurueck."""
+async def try_fetch_ea_full_match(
+    team1: dict, team2: dict, expected_score: tuple[int, int] | None = None
+) -> dict | None:
+    """Sucht in den letzten Freundschaftsspielen von Team1 das Match gegen Team2, gibt das volle
+    Match-Objekt zurueck.
+
+    expected_score (team1_tore, team2_tore): falls angegeben und mehrere Begegnungen zwischen
+    denselben zwei Clubs in der Historie stehen (z.B. Gruppenphase UND KO gegeneinander), wird
+    NUR das Match akzeptiert, dessen EA-Endstand mit unserem eingetragenen Turnier-Ergebnis
+    uebereinstimmt - vorher wurde hier immer das erste gefundene Match genommen, was bei
+    Wiederholungsbegegnungen zum falschen (oder bei Verlaengerung/Elfmeterschiessen zu einem nicht
+    eindeutig zuordenbaren) Match fuehren konnte. Ohne Score-Match lieber nichts zurueckgeben als
+    eine falsche Zuordnung zu riskieren."""
     if not team1.get("ea_club_id") or not team2.get("ea_club_id"):
         return None
     try:
@@ -100,23 +111,48 @@ async def try_fetch_ea_full_match(team1: dict, team2: dict) -> dict | None:
     except Exception:
         return None
 
+    candidates = []
     for m in matches:
         clubs = m.get("clubs", {})
         if str(team1["ea_club_id"]) in clubs and str(team2["ea_club_id"]) in clubs:
-            return m
+            candidates.append(m)
+
+    if not candidates:
+        return None
+    if expected_score is None:
+        return candidates[0]
+
+    s1, s2 = expected_score
+    for m in candidates:
+        clubs = m["clubs"]
+        c1 = clubs[str(team1["ea_club_id"])]
+        c2 = clubs[str(team2["ea_club_id"])]
+        try:
+            if int(c1.get("goals", -1)) == s1 and int(c2.get("goals", -1)) == s2:
+                return m
+        except (TypeError, ValueError):
+            continue
     return None
 
 
-async def capture_match_player_stats(match_id: int, team1_id: int, team2_id: int):
+EA_DISCONNECT_RATING = 3.0  # fester Straf-Wert, den EA einem Spieler gibt, der das Match verlassen hat/disconnected ist
+
+
+async def capture_match_player_stats(match_id: int, team1_id: int, team2_id: int, score1: int | None = None, score2: int | None = None):
     """Sichert die EA-Spielerdaten fuer genau EIN Match sofort nach Ergebniseintragung,
     statt bis zum Bracket-Ende zu warten (die EA-Freundschaftsspiel-Historie ist begrenzt -
     ohne fruehe Sicherung koennten aeltere Matches spaeter aus der API-Historie fallen).
     Wird als Hintergrund-Task angestossen und darf den Ergebnis-Flow niemals stoeren -
-    daher werden alle Fehler hier verschluckt (nur geloggt)."""
+    daher werden alle Fehler hier verschluckt (nur geloggt).
+
+    score1/score2 (unser eingetragenes Turnier-Ergebnis): wird an try_fetch_ea_full_match
+    durchgereicht, um bei Wiederholungsbegegnungen (Gruppenphase + KO gegen denselben Gegner)
+    zwischen mehreren moeglichen EA-Matches das richtige zu erkennen (siehe dortiger Docstring)."""
     try:
         team1 = await get_pool_team(team1_id)
         team2 = await get_pool_team(team2_id)
-        ea_match = await try_fetch_ea_full_match(team1, team2)
+        expected = (score1, score2) if score1 is not None and score2 is not None else None
+        ea_match = await try_fetch_ea_full_match(team1, team2, expected_score=expected)
         if not ea_match:
             return
 
@@ -127,12 +163,18 @@ async def capture_match_player_stats(match_id: int, team1_id: int, team2_id: int
             if not club_players:
                 continue
             for player_id, p in club_players.items():
+                rating = _safe_float(p.get("rating"))
+                if rating == EA_DISCONNECT_RATING:
+                    # Fester EA-Straf-Wert fuer Spieler, die das Match verlassen haben - nicht
+                    # repraesentativ fuer die tatsaechliche Leistung, wuerde den Durchschnitt
+                    # verfaelschen. Lieber ganz auslassen als mitzaehlen.
+                    continue
                 name = p.get("playername") or p.get("proName") or f"Player {player_id}"
                 raw_pos = p.get("position") or p.get("pos") or ""
                 rows.append((
                     match_id, team_id, name,
                     _safe_int(p.get("goals")), _safe_int(p.get("assists")),
-                    _safe_float(p.get("rating")), _safe_int(p.get("mom")), _safe_int(p.get("saves")),
+                    rating, _safe_int(p.get("mom")), _safe_int(p.get("saves")),
                     _position_group(raw_pos),
                 ))
         if not rows:
