@@ -47,7 +47,7 @@ from cogs.tournament_manager import (
 )
 from cogs.stats_manager import post_bracket_stats, StatsChannelsConfigView
 from cogs.moderation import (
-    PlayerBanView, TeamBanView, UnbanSelect,
+    PlayerBanView, TeamBanView, TeamBanSearchModal, UnbanSelect,
     get_all_bans, get_all_team_bans, get_all_guild_teams,
 )
 from cogs.team_manager import (
@@ -1434,13 +1434,7 @@ class AdminPanelCog(commands.Cog):
             )
 
         elif action == "banteam":
-            teams = await get_all_guild_teams(interaction.guild_id)
-            if not teams:
-                await interaction.response.send_message(view=error_embed("Noch keine Teams auf diesem Server."), ephemeral=True)
-                return
-            await interaction.response.send_message(
-                content="Wähle das zu sperrende Team aus:", view=TeamBanView(teams), ephemeral=True
-            )
+            await interaction.response.send_modal(TeamBanSearchModal())
 
         elif action == "banlist":
             user_bans = await get_all_bans(interaction.guild_id)

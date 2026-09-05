@@ -106,6 +106,18 @@ async def get_all_guild_teams(guild_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def search_guild_teams(guild_id: int, query: str, limit: int = 25) -> list[dict]:
+    """Teamsuche per Teilstring - noetig weil ein Discord-Select maximal 25 Optionen zeigen
+    kann und der Server inzwischen deutlich mehr Teams hat als das (vorher wurden Teams jenseits
+    der ersten 25 beim Sperren stillschweigend gar nicht erst angezeigt)."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT id, name FROM teams WHERE guild_id = $1 AND dissolved_at IS NULL AND name ILIKE $2 ORDER BY name LIMIT $3",
+        guild_id, f"%{query}%", limit,
+    )
+    return [dict(r) for r in rows]
+
+
 async def withdraw_team_from_open_tournaments(bot: commands.Bot, team_id: int, team_name: str) -> list[str]:
     """
     Zieht ein Team aus allen Turnieren zurueck, bei denen die Anmeldung noch
@@ -267,6 +279,30 @@ class PlayerBanView(discord.ui.View):
         user = select.values[0]
         await interaction.response.send_modal(
             BanReasonModal(target_type="user", target_id=user.id, target_label=user.display_name)
+        )
+
+
+class TeamBanSearchModal(discord.ui.Modal, title="Team suchen"):
+    """Erster Schritt vorm Sperren: Teamname (oder Teil davon) suchen - ein Discord-Select
+    kann nur 25 Optionen zeigen, bei deutlich mehr Teams auf dem Server wurden vorher alle
+    jenseits der ersten 25 (alphabetisch) beim Sperren gar nicht erst angezeigt."""
+    query_input = discord.ui.TextInput(label="Teamname (auch Teil reicht)", max_length=100)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        matches = await search_guild_teams(interaction.guild_id, self.query_input.value)
+        if not matches:
+            await interaction.response.send_message(
+                view=error_embed(f"Kein Team gefunden für „{self.query_input.value}“."), ephemeral=True
+            )
+            return
+        if len(matches) == 1:
+            team = matches[0]
+            await interaction.response.send_modal(
+                BanReasonModal(target_type="team", target_id=team["id"], target_label=team["name"])
+            )
+            return
+        await interaction.response.send_message(
+            content=f"{len(matches)} Treffer - welches Team?", view=TeamBanView(matches), ephemeral=True
         )
 
 
