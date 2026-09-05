@@ -2891,7 +2891,23 @@ class TournamentCog(commands.Cog):
             text = f"{mentions}\n### 📹 Größenvideo wurde vom Gegner gefordert."
             view = discord.ui.LayoutView(timeout=None)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
-            await interaction.response.send_message(view=view)
+
+            # In BEIDE Kanaele posten (Gruppenkanal + Panel-Kanal) - die Buttons sitzen nur im
+            # Panel-Kanal, aber die meisten Manager schauen eher in den normalen Gruppenkanal.
+            await interaction.response.send_message(view=success_embed("Größenvideo angefordert."), ephemeral=True)
+            for channel_id in {group["channel_id"], group["panel_channel_id"]}:
+                if not channel_id:
+                    continue
+                target_channel = interaction.guild.get_channel(channel_id)
+                if target_channel is None:
+                    try:
+                        target_channel = await interaction.guild.fetch_channel(channel_id)
+                    except discord.HTTPException:
+                        continue
+                try:
+                    await target_channel.send(view=view)
+                except discord.HTTPException:
+                    pass
 
             for m in opponent_managers:
                 try:
@@ -2993,7 +3009,27 @@ class TournamentCog(commands.Cog):
             text = f"{mentions}\n### 📹 Größenvideo wurde vom Gegner gefordert."
             view = discord.ui.LayoutView(timeout=None)
             view.add_item(discord.ui.Container(discord.ui.TextDisplay(text), accent_color=discord.Color.gold()))
-            await interaction.response.send_message(view=view)
+
+            # In BEIDE Kanaele posten (Bracket-Kanal + Panel-Kanal)
+            await interaction.response.send_message(view=success_embed("Größenvideo angefordert."), ephemeral=True)
+            bracket_meta = await get_pool().fetchrow(
+                "SELECT channel_id, panel_channel_id FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
+                tournament_id, bracket,
+            )
+            channel_ids = {bracket_meta["channel_id"], bracket_meta["panel_channel_id"]} if bracket_meta else set()
+            for channel_id in channel_ids:
+                if not channel_id:
+                    continue
+                target_channel = interaction.guild.get_channel(channel_id)
+                if target_channel is None:
+                    try:
+                        target_channel = await interaction.guild.fetch_channel(channel_id)
+                    except discord.HTTPException:
+                        continue
+                try:
+                    await target_channel.send(view=view)
+                except discord.HTTPException:
+                    pass
 
             for m in opponent_managers:
                 try:
