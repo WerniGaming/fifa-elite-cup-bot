@@ -1143,9 +1143,6 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
         media,
         discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
         discord.ui.TextDisplay("\n".join(ready_lines)),
-        discord.ui.ActionRow(
-            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
-        ),
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
@@ -1956,14 +1953,17 @@ async def build_bracket_panel_view(tournament_id: int, bracket: str) -> discord.
     return view
 
 
-async def create_bracket_panel_channel(guild: discord.Guild, tournament_id: int, bracket: str, role: discord.Role) -> discord.TextChannel:
+async def create_bracket_panel_channel(
+    guild: discord.Guild, tournament_id: int, bracket: str, role: discord.Role,
+    category: discord.CategoryChannel | None = None,
+) -> discord.TextChannel:
     """Legt den 'nur Panel'-Kanal fuer ein Bracket an (z.B. 'winner-bracket-panel'), nur Bot darf dort schreiben."""
     pool = get_pool()
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True)}
     overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
     overwrites = await apply_staff_overwrites(guild, overwrites)
 
-    panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], overwrites=overwrites)
+    panel_channel = await guild.create_text_channel(f"{bracket}-bracket-panel"[:100], category=category, overwrites=overwrites)
     panel = await build_bracket_panel_view(tournament_id, bracket)
     msg = await panel_channel.send(view=panel, files=[panel.schedule_file] if panel.schedule_file else [])
     await pool.execute(
@@ -1997,7 +1997,10 @@ async def refresh_bracket_panel(bot: commands.Bot, tournament_id: int, bracket: 
     await msg.edit(view=panel, attachments=[panel.schedule_file] if panel.schedule_file else [])
 
 
-async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int]) -> list[dict]:
+async def create_bracket(
+    bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int],
+    category: discord.CategoryChannel | None = None,
+) -> list[dict]:
     """Erstellt Rolle+Kanal fuer ein einzelnes Bracket (winner/loser) und die Runde-1-Paarungen."""
     if not team_ids:
         return []
@@ -2055,7 +2058,9 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
     overwrites = await apply_staff_overwrites(guild, overwrites)
     try:
         channel = await asyncio.wait_for(
-            guild.create_text_channel("winner-bracket" if bracket == "winner" else "looser-bracket", overwrites=overwrites), timeout=15
+            guild.create_text_channel(
+                "winner-bracket" if bracket == "winner" else "looser-bracket", category=category, overwrites=overwrites
+            ), timeout=15
         )
     except asyncio.TimeoutError:
         log.error(f"Timeout beim Erstellen des Kanals fuer Bracket '{bracket}' (Turnier {tournament_id})")
@@ -2138,7 +2143,7 @@ async def create_bracket(bot: commands.Bot, guild: discord.Guild, tournament_id:
     await channel.send(view=build_bracket_actions_view(tournament_id, bracket))
 
     try:
-        await create_bracket_panel_channel(guild, tournament_id, bracket, role)
+        await create_bracket_panel_channel(guild, tournament_id, bracket, role, category)
     except Exception:
         log.exception(f"Fehler beim Erstellen des Panel-Kanals fuer Bracket '{bracket}' (Turnier {tournament_id})")
 
@@ -2191,6 +2196,13 @@ async def cleanup_tournament_channels(bot: commands.Bot, guild: discord.Guild, t
                 await category.delete(reason="Turnier beendet")
             except discord.HTTPException:
                 pass
+    if t and t.get("bracket_category_id"):
+        category = guild.get_channel(t["bracket_category_id"])
+        if category:
+            try:
+                await category.delete(reason="Turnier beendet")
+            except discord.HTTPException:
+                pass
 
 
 async def reset_knockout_phase(bot: commands.Bot, guild: discord.Guild, tournament_id: int):
@@ -2218,10 +2230,19 @@ async def reset_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
                 except discord.HTTPException:
                     pass
 
+    t = await get_tournament(tournament_id)
+    if t and t.get("bracket_category_id"):
+        category = guild.get_channel(t["bracket_category_id"])
+        if category:
+            try:
+                await category.delete(reason="KO-Phase zurueckgesetzt")
+            except discord.HTTPException:
+                pass
+
     await pool.execute("DELETE FROM tournament_matches WHERE tournament_id = $1 AND phase = 'knockout'", tournament_id)
     await pool.execute("DELETE FROM tournament_bracket_meta WHERE tournament_id = $1", tournament_id)
     await pool.execute(
-        "UPDATE tournaments SET phase = 'groups', winner_champion_id = NULL, loser_champion_id = NULL WHERE id = $1",
+        "UPDATE tournaments SET phase = 'groups', winner_champion_id = NULL, loser_champion_id = NULL, bracket_category_id = NULL WHERE id = $1",
         tournament_id,
     )
 
@@ -2275,8 +2296,16 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     winner_teams = [s["team_id"] for s in winner_seeds]
     loser_teams = [s["team_id"] for s in loser_seeds]
 
-    await create_bracket(bot, guild, tournament_id, t, "winner", winner_teams)
-    await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams)
+    category_overwrites = await apply_staff_overwrites(guild, {})
+    category = await guild.create_category(f"{t['name']} KO-Phase"[:100], overwrites=category_overwrites)
+    try:
+        await category.edit(position=len(guild.categories) + 10)  # ganz nach unten
+    except discord.HTTPException:
+        pass
+    await pool.execute("UPDATE tournaments SET bracket_category_id = $1 WHERE id = $2", category.id, tournament_id)
+
+    await create_bracket(bot, guild, tournament_id, t, "winner", winner_teams, category)
+    await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams, category)
 
 
 async def team_name_map(team_ids: list[int]) -> dict[int, str]:
