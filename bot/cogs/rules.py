@@ -154,7 +154,14 @@ def build_cup_rules_view() -> tuple[discord.ui.LayoutView, discord.File]:
             "- Ergebnisse werden über den Bot gemeldet (Button **Ergebnis eintragen** im Gruppen-/"
             "Bracket-Panel) - passende EA-Club-Spiele werden automatisch erkannt, sonst manuell eintragen\n"
             "- Der Gegner muss das gemeldete Ergebnis im Bot bestätigen, bevor es zählt\n"
-            "- Wird kein Ergebnis gemeldet oder nicht bestätigt, entscheidet die Cupleitung über die Wertung"
+            "- Wird kein Ergebnis gemeldet oder nicht bestätigt, entscheidet die Cupleitung über die Wertung\n\n"
+            "⚠️ **Bei Unentschieden (auch in der Gruppenphase!):** EA speichert unentschiedene "
+            "Freundschaftsspiele oft NICHT sauber in der Match-Historie ab - dadurch fehlen "
+            "Spielerstatistiken (Awards, Team des Turniers) komplett. Deshalb bei einem Unentschieden "
+            "bitte in die Verlängerung gehen: **das Team mit Anstoß schießt ein Eigentor**, damit ein "
+            "entschiedenes Ergebnis gespeichert wird - gewertet wird trotzdem das Unentschieden, das "
+            "Eigentor zählt NICHT als Tor. Ohne das gibt's am Ende keine Statistiken für dieses Spiel - "
+            "danach gilt das nicht mehr als Beschwerdegrund."
         ),
         discord.ui.Separator(),
         _section(
