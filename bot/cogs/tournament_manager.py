@@ -888,6 +888,11 @@ class ScoreModal(discord.ui.Modal):
                 )
             return
 
+        # Sofort antworten (defer), BEVOR die (potenziell langsame) Spielplan-Grafik erzeugt wird -
+        # sonst laeuft das 3-Sekunden-Interaktionsfenster ab, bevor ueberhaupt geantwortet wurde
+        # ("Unknown interaction"), live beobachtet bei mehreren Ergebnis-Meldungen.
+        await interaction.response.defer()
+
         role1 = await get_role_for_user(self.team1_id, interaction.user.id)
         reporter_team_id = self.team1_id if role1 else self.team2_id
         opponent_team_id = self.team2_id if reporter_team_id == self.team1_id else self.team1_id
@@ -934,9 +939,9 @@ class ScoreModal(discord.ui.Modal):
                 log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Bestaetigungs-Embed (Match {self.match_id})")
 
         if image_file:
-            await interaction.response.send_message(view=view, file=image_file)
+            await interaction.followup.send(view=view, file=image_file)
         else:
-            await interaction.response.send_message(view=view)
+            await interaction.followup.send(view=view)
 
 
 class ConfirmMatchView(discord.ui.View):
