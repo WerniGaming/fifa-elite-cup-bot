@@ -32,6 +32,7 @@ INITIAL_COGS = [
     "cogs.polls",
     "cogs.staff_overview",
     "cogs.substitutes",
+    "cogs.daily_reset",
 ]
 
 
