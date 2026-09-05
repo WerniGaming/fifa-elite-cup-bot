@@ -38,6 +38,7 @@ class FifaEliteCupBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True  # nötig für das Logo-Upload per Chat-Nachricht
+        intents.members = True  # noetig damit role.members zuverlaessig gefuellt ist (Staff-Uebersicht u.a.)
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):

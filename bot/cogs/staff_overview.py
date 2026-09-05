@@ -17,22 +17,41 @@ from db import get_pool
 from permissions import is_tournament_admin
 from ui_helpers import success_embed, error_embed
 
-STAFF_RANKS = ["Verwaltung", "Administrator", "Head Moderator", "Moderator", "Trial Moderator"]
+STAFF_RANKS = [
+    ("Verwaltung", "👑"),
+    ("Administrator", "⚡"),
+    ("Head Moderator", "🎖️"),
+    ("Moderator", "🔰"),
+    ("Trial Moderator", "🌱"),
+]
 
 
 async def build_staff_overview_view(guild: discord.Guild) -> discord.ui.LayoutView:
-    blocks = ["# 👥 Staff-Übersicht", "-# Aktualisiert sich automatisch bei Rollenänderungen", ""]
-    for rank_name in STAFF_RANKS:
+    header = discord.ui.TextDisplay(
+        "# 👥 FIFA Elite Cup — Staff-Team\n"
+        "-# Live-Übersicht — aktualisiert sich automatisch bei jeder Rollenänderung"
+    )
+
+    total = 0
+    items: list = [header, discord.ui.Separator(spacing=discord.SeparatorSpacing.large)]
+    for rank_name, icon in STAFF_RANKS:
         role = discord.utils.get(guild.roles, name=rank_name)
-        blocks.append(f"### {rank_name}")
-        if not role or not role.members:
-            blocks.append("_niemand_")
+        members = role.members if role else []
+        total += len(members)
+
+        block_lines = [f"### {icon} {rank_name}  ·  `{len(members)}`"]
+        if members:
+            block_lines.append("\n".join(f"> {m.mention}" for m in members))
         else:
-            blocks.append(", ".join(m.mention for m in role.members))
-        blocks.append("")
+            block_lines.append("> _aktuell unbesetzt_")
+        items.append(discord.ui.TextDisplay("\n".join(block_lines)))
+        items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+    now_ts = int(discord.utils.utcnow().timestamp())
+    items.append(discord.ui.TextDisplay(f"-# 👤 **{total}** Staff-Mitglieder insgesamt  ·  zuletzt aktualisiert <t:{now_ts}:R>"))
 
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(discord.ui.Container(discord.ui.TextDisplay("\n".join(blocks)), accent_color=discord.Color.gold()))
+    view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
     return view
 
 
