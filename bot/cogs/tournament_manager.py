@@ -1427,18 +1427,11 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
                         f"🔴 `ST {m['round']}` {m_names.get(m['team1_id'], '?')} 🆚 {m_names.get(m['team2_id'], '?')}"
                     )
 
-            completed_matches = [m for m in matches if m["status"] == "completed"]
-            if completed_matches:
-                c_names = await team_name_map(
-                    [m["team1_id"] for m in completed_matches] + [m["team2_id"] for m in completed_matches]
-                )
-                block.append("")
-                block.append("**Ergebnisse:**")
-                for m in completed_matches:
-                    block.append(
-                        f"✅ `ST {m['round']}` {c_names.get(m['team1_id'], '?')} `{m['team1_score']}:{m['team2_score']}` {c_names.get(m['team2_id'], '?')}"
-                    )
-
+            # Bewusst KEINE volle "Ergebnisse:"-Liste mehr hier - die wuchs unbegrenzt mit dem
+            # Turnierfortschritt (bei vielen Gruppen/Spielen ueberschritt der gesamte Nachrichtentext
+            # irgendwann Discords 4000-Zeichen-Limit fuer Components V2 und liess JEDE
+            # Ergebnis-Verarbeitung crashen, live beobachtet). Ergebnisse stehen ohnehin schon in
+            # der Spielplan-Grafik direkt darunter und in den Gruppenkanaelen/-Panels.
             items.append(discord.ui.TextDisplay("\n".join(block)))
 
             # Zusaetzlich zur Text-Zusammenfassung auch die Spielplan-Grafik einbetten (gleiche
