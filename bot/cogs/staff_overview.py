@@ -36,7 +36,10 @@ async def build_staff_overview_view(guild: discord.Guild) -> discord.ui.LayoutVi
     items: list = [header, discord.ui.Separator(spacing=discord.SeparatorSpacing.large)]
     for rank_name, icon in STAFF_RANKS:
         role = discord.utils.get(guild.roles, name=rank_name)
-        members = role.members if role else []
+        # Bewusst ueber die rohen Rollen-IDs (member._roles) statt role.members/member.roles -
+        # letzteres loest jede Rollen-ID einzeln ueber guild.get_role() auf und laesst Mitglieder
+        # stillschweigend weg, wenn der Rollen-Cache im Moment unvollstaendig ist.
+        members = [m for m in guild.members if role and role.id in m._roles] if role else []
         total += len(members)
 
         block_lines = [f"### {icon} {rank_name}  ·  `{len(members)}`"]
