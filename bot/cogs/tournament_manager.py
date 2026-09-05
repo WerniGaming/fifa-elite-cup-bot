@@ -5,6 +5,7 @@ Runde-1-Paarungen, Team-/Turnierübersicht.
 """
 from __future__ import annotations
 import asyncio
+import io
 import logging
 import math
 import os
@@ -930,17 +931,53 @@ class ScoreModal(discord.ui.Modal):
             )
         )
 
-        image_file = None
+        image_bytes = None
+        image_filename = "spielplan.png"
         if match["phase"] == "group" and match.get("group_id"):
             try:
                 group = await get_pool().fetchrow("SELECT * FROM tournament_groups WHERE id = $1", match["group_id"])
                 image_file = await build_group_schedule_file(dict(group))
+                image_bytes = image_file.fp.read()
+                image_filename = image_file.filename
             except Exception:
                 log.exception(f"Fehler beim Erstellen der Spielplan-Grafik fuer Bestaetigungs-Embed (Match {self.match_id})")
 
-        if image_file:
-            await interaction.followup.send(view=view, file=image_file)
-        else:
+        # In BEIDE Kanaele posten (Gruppen-/Bracket-Kanal + Panel-Kanal) - analog zur
+        # Groessenvideo-Anforderung, da die Buttons nur im Panel-Kanal sitzen, viele Manager
+        # aber eher den normalen Kanal im Blick haben.
+        channel_ids: set[int] = set()
+        if match["phase"] == "group" and match.get("group_id"):
+            group_row = await get_pool().fetchrow("SELECT channel_id, panel_channel_id FROM tournament_groups WHERE id = $1", match["group_id"])
+            if group_row:
+                channel_ids = {group_row["channel_id"], group_row["panel_channel_id"]}
+        elif match["phase"] == "knockout":
+            bracket_row = await get_pool().fetchrow(
+                "SELECT channel_id, panel_channel_id FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2",
+                match["tournament_id"], match["bracket"],
+            )
+            if bracket_row:
+                channel_ids = {bracket_row["channel_id"], bracket_row["panel_channel_id"]}
+        if not channel_ids:
+            channel_ids = {interaction.channel_id}
+
+        sent_once = False
+        for channel_id in channel_ids:
+            if not channel_id:
+                continue
+            target_channel = interaction.guild.get_channel(channel_id)
+            if target_channel is None:
+                try:
+                    target_channel = await interaction.guild.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    continue
+            files = [discord.File(io.BytesIO(image_bytes), filename=image_filename)] if image_bytes else []
+            try:
+                await target_channel.send(view=view, files=files)
+                sent_once = True
+            except discord.HTTPException:
+                log.exception(f"Fehler beim Posten der Ergebnis-Bestaetigung in Kanal {channel_id} (Match {self.match_id})")
+
+        if not sent_once:
             await interaction.followup.send(view=view)
 
 
