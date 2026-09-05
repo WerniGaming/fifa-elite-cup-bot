@@ -25,7 +25,7 @@ CATEGORIES = {
     "bug": ("🐛", "Bug", discord.Color.red()),
     "vorschlag": ("💡", "Vorschlag", discord.Color.gold()),
     "lob": ("⭐", "Lob", discord.Color.green()),
-    "beschwerde": ("😕", "Beschwerde", discord.Color.orange()),
+    "beschwerde": ("😕", "Kritik", discord.Color.orange()),
 }
 
 STATUS = {
@@ -38,23 +38,37 @@ STATUS = {
 
 def build_feedback_container(feedback: dict, vote_count: int) -> discord.ui.Container:
     emoji, label, _color = CATEGORIES.get(feedback["category"], ("💬", "Feedback", discord.Color.gold()))
-    s_emoji, s_label, s_color = STATUS.get(feedback["status"], STATUS["open"])
+    is_lob = feedback["category"] == "lob"
     text = f"### {emoji} {label} — {feedback['title']}\n"
     if feedback["description"]:
         text += f"{feedback['description']}\n\n"
-    text += f"**Status:** {s_emoji} {s_label}\n"
-    text += f"-# von <@{feedback['author_discord_id']}> · #{feedback['id']}"
 
-    row = discord.ui.ActionRow(
-        discord.ui.Button(
-            label=f"Hilfreich ({vote_count})", emoji="👍", style=discord.ButtonStyle.secondary,
-            custom_id=f"feedback:vote:{feedback['id']}",
-        ),
-        discord.ui.Button(
-            label="Status", emoji="🔧", style=discord.ButtonStyle.secondary,
-            custom_id=f"feedback:managestatus:{feedback['id']}",
-        ),
-    )
+    # Lob braucht keinen Bearbeitungs-Status - ein Lob wird nicht "angenommen" oder "abgelehnt",
+    # das ergibt inhaltlich keinen Sinn. Nur Bug/Vorschlag/Kritik durchlaufen den Status-Workflow.
+    if is_lob:
+        s_color = discord.Color.green()
+        text += f"-# von <@{feedback['author_discord_id']}> · #{feedback['id']}"
+        buttons = [
+            discord.ui.Button(
+                label=f"Hilfreich ({vote_count})", emoji="👍", style=discord.ButtonStyle.secondary,
+                custom_id=f"feedback:vote:{feedback['id']}",
+            ),
+        ]
+    else:
+        s_emoji, s_label, s_color = STATUS.get(feedback["status"], STATUS["open"])
+        text += f"**Status:** {s_emoji} {s_label}\n"
+        text += f"-# von <@{feedback['author_discord_id']}> · #{feedback['id']}"
+        buttons = [
+            discord.ui.Button(
+                label=f"Hilfreich ({vote_count})", emoji="👍", style=discord.ButtonStyle.secondary,
+                custom_id=f"feedback:vote:{feedback['id']}",
+            ),
+            discord.ui.Button(
+                label="Status", emoji="🔧", style=discord.ButtonStyle.secondary,
+                custom_id=f"feedback:managestatus:{feedback['id']}",
+            ),
+        ]
+    row = discord.ui.ActionRow(*buttons)
     return discord.ui.Container(discord.ui.TextDisplay(text), row, accent_color=s_color)
 
 
@@ -111,6 +125,7 @@ class FeedbackModal(discord.ui.Modal):
         await interaction.response.send_message(view=view)
         msg = await interaction.original_response()
         await pool.execute("UPDATE feedback SET message_id = $1 WHERE id = $2", msg.id, row["id"])
+        await repost_panel_at_bottom(interaction.client, interaction.guild_id, interaction.channel)
 
 
 class FeedbackStatusView(discord.ui.View):
@@ -131,6 +146,28 @@ class FeedbackStatusView(discord.ui.View):
         await refresh_feedback_message(interaction.client, self.feedback_id)
         _emoji, label, _c = STATUS[new_status]
         await interaction.response.edit_message(content=f"Status auf **{label}** gesetzt.", view=None)
+
+
+async def repost_panel_at_bottom(bot: commands.Bot, guild_id: int, channel: discord.abc.Messageable):
+    """Loescht das alte Kategorie-Panel und postet es frisch ans Ende des Kanals, damit es nicht
+    unter den Feedback-Karten verschwindet - Discord erlaubt kein 'ans Ende verschieben', nur
+    loeschen+neu posten."""
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT feedback_panel_message_id FROM guild_settings WHERE guild_id = $1", guild_id)
+    if row and row["feedback_panel_message_id"]:
+        try:
+            old_msg = await channel.fetch_message(row["feedback_panel_message_id"])
+            await old_msg.delete()
+        except discord.HTTPException:
+            pass
+
+    view, banner_file = build_feedback_panel()
+    msg = await channel.send(view=view, files=[banner_file])
+    await pool.execute(
+        "INSERT INTO guild_settings (guild_id, feedback_panel_message_id) VALUES ($1, $2) "
+        "ON CONFLICT (guild_id) DO UPDATE SET feedback_panel_message_id = $2",
+        guild_id, msg.id,
+    )
 
 
 def build_feedback_panel() -> tuple[discord.ui.LayoutView, discord.File]:
@@ -222,6 +259,12 @@ class FeedbackCog(commands.Cog):
             interaction.guild_id, interaction.channel_id,
         )
         await interaction.response.send_message(view=view, files=[banner_file])
+        msg = await interaction.original_response()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, feedback_panel_message_id) VALUES ($1, $2) "
+            "ON CONFLICT (guild_id) DO UPDATE SET feedback_panel_message_id = $2",
+            interaction.guild_id, msg.id,
+        )
 
 
 async def setup(bot: commands.Bot):
