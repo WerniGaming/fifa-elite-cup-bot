@@ -10,24 +10,48 @@ from db import get_pool
 
 
 async def is_tournament_admin(member: discord.Member) -> bool:
+    """Echte Discord-Administrator-Rechte ODER Mitglied der (einzelnen) admin_role_id ODER
+    einer der admin_role_ids (mehrere gleichrangige Admin-Raenge, z.B. Head Moderator zusaetzlich
+    zu Administrator/Verwaltung, die ueber echte Discord-Admin-Rechte laufen)."""
     if member.guild_permissions.administrator:
         return True
     pool = get_pool()
-    row = await pool.fetchrow("SELECT admin_role_id FROM guild_settings WHERE guild_id = $1", member.guild.id)
-    if not row or not row["admin_role_id"]:
+    row = await pool.fetchrow("SELECT admin_role_id, admin_role_ids FROM guild_settings WHERE guild_id = $1", member.guild.id)
+    if not row:
         return False
-    return any(r.id == row["admin_role_id"] for r in member.roles)
+    role_ids = {r.id for r in member.roles}
+    if row["admin_role_id"] and row["admin_role_id"] in role_ids:
+        return True
+    return bool(row["admin_role_ids"]) and any(rid in role_ids for rid in row["admin_role_ids"])
 
 
 async def is_tournament_moderator(member: discord.Member) -> bool:
-    """Admin ODER die globale Moderator-Rolle (darf Ergebnisse fuer alle Turniere/Gruppen melden/bestaetigen, ohne vollen Admin-Zugriff)."""
+    """Admin ODER die globale Moderator-Rolle(n) (darf Ergebnisse fuer alle Turniere/Gruppen
+    melden/bestaetigen, ohne vollen Admin-Zugriff). mod_role_ids erlaubt mehrere gleichrangige
+    Raenge (z.B. Trial Moderator + Moderator + Head Moderator)."""
     if await is_tournament_admin(member):
         return True
     pool = get_pool()
-    row = await pool.fetchrow("SELECT mod_role_id FROM guild_settings WHERE guild_id = $1", member.guild.id)
-    if not row or not row["mod_role_id"]:
+    row = await pool.fetchrow("SELECT mod_role_id, mod_role_ids FROM guild_settings WHERE guild_id = $1", member.guild.id)
+    if not row:
         return False
-    return any(r.id == row["mod_role_id"] for r in member.roles)
+    role_ids = {r.id for r in member.roles}
+    if row["mod_role_id"] and row["mod_role_id"] in role_ids:
+        return True
+    return bool(row["mod_role_ids"]) and any(rid in role_ids for rid in row["mod_role_ids"])
+
+
+async def can_correct_results(member: discord.Member) -> bool:
+    """Admin ODER ein Rang mit Erlaubnis, bereits abgeschlossene Ergebnisse nachtraeglich zu
+    korrigieren (z.B. Moderator + Head Moderator, aber NICHT Trial Moderator)."""
+    if await is_tournament_admin(member):
+        return True
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT correct_role_ids FROM guild_settings WHERE guild_id = $1", member.guild.id)
+    if not row or not row["correct_role_ids"]:
+        return False
+    role_ids = {r.id for r in member.roles}
+    return any(rid in role_ids for rid in row["correct_role_ids"])
 
 
 async def is_ticket_support(member: discord.Member) -> bool:

@@ -54,7 +54,7 @@ from cogs.team_manager import (
     get_team_managers, EditFieldModal, LogoUploadModal, CoManagerView, is_valid_twitch_link, apply_team_nickname,
     dissolve_team_by_admin,
 )
-from permissions import is_tournament_admin
+from permissions import is_tournament_admin, is_tournament_moderator, can_correct_results
 from cogs.embed_builder import EmbedBuilderModal
 
 log = logging.getLogger("fifa-elite-cup")
@@ -796,6 +796,22 @@ class TournamentAdminView(discord.ui.View):
         super().__init__(timeout=180)
         self.t = t
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Die meisten Buttons hier bleiben vollen Admins (inkl. Head Moderator ueber
+        admin_role_ids) vorbehalten. 'Ergebnis eintragen' und 'Ergebnis korrigieren' sind
+        bewusst gelockert - Ergebnisse melden duerfen alle Moderator-Raenge, korrigieren
+        duerfen Moderator + Head Moderator (nicht Trial Moderator)."""
+        custom_id = interaction.data.get("custom_id", "") if interaction.data else ""
+        if custom_id == "ta:report_result":
+            allowed = await is_tournament_moderator(interaction.user)
+        elif custom_id == "ta:correct_result":
+            allowed = await can_correct_results(interaction.user)
+        else:
+            allowed = await is_tournament_admin(interaction.user)
+        if not allowed:
+            await interaction.response.send_message(view=error_embed("Dafür fehlt dir die Berechtigung."), ephemeral=True)
+        return allowed
+
     @discord.ui.button(label="Anmeldung schließen", style=discord.ButtonStyle.secondary)
     async def close_signup(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -1151,7 +1167,7 @@ class TournamentAdminView(discord.ui.View):
         view.add_item(discord.ui.Container(*items, accent_color=discord.Color.gold()))
         await interaction.response.send_message(view=view, ephemeral=True)
 
-    @discord.ui.button(label="Ergebnis eintragen", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Ergebnis eintragen", style=discord.ButtonStyle.primary, custom_id="ta:report_result")
     async def report_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         matches = await get_all_open_matches(self.t["id"])
         if not matches:
@@ -1165,7 +1181,7 @@ class TournamentAdminView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Ergebnis korrigieren", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Ergebnis korrigieren", style=discord.ButtonStyle.secondary, custom_id="ta:correct_result")
     async def correct_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         matches = await get_all_completed_matches(self.t["id"])
         if not matches:
