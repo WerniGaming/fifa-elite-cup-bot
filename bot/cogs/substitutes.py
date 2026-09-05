@@ -38,14 +38,6 @@ POSITIONS = [
 ]
 POSITION_LABELS = dict(POSITIONS)
 
-EXPERIENCE_LEVELS = [
-    ("keine", "🆕 Noch keine"),
-    ("wenig", "🌱 Ein bis zwei"),
-    ("mittel", "📈 Drei bis fünf"),
-    ("viel", "🏆 Mehr als fünf"),
-]
-EXPERIENCE_LABELS = dict(EXPERIENCE_LEVELS)
-
 
 def position_text(positions: list[str]) -> str:
     return " · ".join(POSITION_LABELS.get(p, p) for p in positions)
@@ -99,7 +91,7 @@ def build_panel_view(offers: list[dict], requests: list[dict]) -> discord.ui.Lay
         items.append(discord.ui.TextDisplay("_Aktuell bietet sich niemand an - sei die/der Erste!_"))
     else:
         for o in offers:
-            exp = f"Cup: {EXPERIENCE_LABELS.get(o['cup_experience'], '?')} · Liga: {EXPERIENCE_LABELS.get(o['league_experience'], '?')}"
+            exp = f"Cup-Erfahrung: {o['cup_experience']} · Liga-Erfahrung: {o['league_experience']}"
             cand_txt = f" · {o['candidate_count']} Interessent(en)" if o["candidate_count"] else ""
             lines = [f"> <@{o['discord_id']}> — {position_text(o['positions'])}{cand_txt}", f"> -# {exp}"]
             if o["note"]:
@@ -175,17 +167,16 @@ async def refresh_substitute_panel(bot: commands.Bot, guild: discord.Guild):
         pass
 
 
-# ---------- Zwischenschritt: Position(en) + evtl. Erfahrung waehlen, dann Modal ----------
+# ---------- Zwischenschritt: Position(en) waehlen, dann Modal ----------
 
 class PositionSelectView(discord.ui.View):
     """Discord-Modals koennen keine Select-Menus enthalten, deshalb hier erst Positionen
-    (+ bei einem Angebot Erfahrung) per Select waehlen, danach per Button ins Modal."""
+    per Select waehlen, danach per Button ins Modal (dort auch Cup-/Liga-Erfahrung als
+    Freitext, damit z.B. 'VPG' oder ein konkreter Liga-/Cup-Name reinpasst)."""
 
     def __init__(self, *, ask_experience: bool):
         super().__init__(timeout=180)
         self.positions: list[str] = []
-        self.cup_experience: str | None = None
-        self.league_experience: str | None = None
         self.ask_experience = ask_experience
 
         pos_select = discord.ui.Select(
@@ -195,60 +186,37 @@ class PositionSelectView(discord.ui.View):
         pos_select.callback = self._on_positions
         self.add_item(pos_select)
 
-        if ask_experience:
-            cup_select = discord.ui.Select(
-                placeholder="Cup-Erfahrung...", options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
-            )
-            cup_select.callback = self._on_cup_exp
-            self.add_item(cup_select)
-
-            league_select = discord.ui.Select(
-                placeholder="Liga-Erfahrung...", options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
-            )
-            league_select.callback = self._on_league_exp
-            self.add_item(league_select)
-
         self.continue_button = discord.ui.Button(label="Weiter", style=discord.ButtonStyle.success, disabled=True)
         self.continue_button.callback = self._on_continue
         self.add_item(self.continue_button)
 
-    def _check_ready(self):
-        ready = bool(self.positions) and (not self.ask_experience or (self.cup_experience and self.league_experience))
-        self.continue_button.disabled = not ready
-
     async def _on_positions(self, interaction: discord.Interaction):
         self.positions = interaction.data["values"]
-        self._check_ready()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_cup_exp(self, interaction: discord.Interaction):
-        self.cup_experience = interaction.data["values"][0]
-        self._check_ready()
-        await interaction.response.edit_message(view=self)
-
-    async def _on_league_exp(self, interaction: discord.Interaction):
-        self.league_experience = interaction.data["values"][0]
-        self._check_ready()
+        self.continue_button.disabled = False
         await interaction.response.edit_message(view=self)
 
     async def _on_continue(self, interaction: discord.Interaction):
         if self.ask_experience:
-            await interaction.response.send_modal(OfferNoteModal(self.positions, self.cup_experience, self.league_experience))
+            await interaction.response.send_modal(OfferNoteModal(self.positions))
         else:
             await interaction.response.send_modal(RequestDescriptionModal(self.positions))
 
 
 class OfferNoteModal(discord.ui.Modal, title="Als Aushilfe anbieten"):
+    cup_input = discord.ui.TextInput(
+        label="Cup-Erfahrung", max_length=100, placeholder="z.B. 3 Cups gespielt, 1x Sieger, o.ä.",
+    )
+    league_input = discord.ui.TextInput(
+        label="Liga-Erfahrung", max_length=100, placeholder="z.B. VPG, eigene Liga-Namen, o.ä.",
+    )
     note_input = discord.ui.TextInput(
         label="Verfügbarkeit / Anmerkung (optional)", style=discord.TextStyle.paragraph,
         required=False, max_length=300, placeholder="z.B. nur abends, aktuell auf PS5, usw.",
     )
 
-    def __init__(self, positions: list[str], cup_experience: str, league_experience: str):
+    def __init__(self, positions: list[str]):
         super().__init__()
         self.positions = positions
-        self.cup_experience = cup_experience
-        self.league_experience = league_experience
 
     async def on_submit(self, interaction: discord.Interaction):
         pool = get_pool()
@@ -265,7 +233,7 @@ class OfferNoteModal(discord.ui.Modal, title="Als Aushilfe anbieten"):
         await pool.execute(
             "INSERT INTO substitute_offers (guild_id, discord_id, positions, cup_experience, league_experience, note) "
             "VALUES ($1, $2, $3, $4, $5, $6)",
-            interaction.guild_id, interaction.user.id, self.positions, self.cup_experience, self.league_experience,
+            interaction.guild_id, interaction.user.id, self.positions, self.cup_input.value, self.league_input.value,
             self.note_input.value or None,
         )
         await interaction.response.send_message(content=f"✅ Du bist jetzt als Aushilfe gelistet ({position_text(self.positions)}).", ephemeral=True)
