@@ -295,12 +295,10 @@ class TeamBanSearchModal(discord.ui.Modal, title="Team suchen"):
                 view=error_embed(f"Kein Team gefunden für „{self.query_input.value}“."), ephemeral=True
             )
             return
-        if len(matches) == 1:
-            team = matches[0]
-            await interaction.response.send_modal(
-                BanReasonModal(target_type="team", target_id=team["id"], target_label=team["name"])
-            )
-            return
+        # Bewusst IMMER die Auswahl zeigen (auch bei nur einem Treffer) statt direkt ins naechste
+        # Modal zu springen - ein Modal kann bei dieser discord.py-Version nicht zuverlaessig
+        # direkt aus einem anderen Modal heraus geoeffnet werden (400 Invalid Form Body), ueber
+        # einen Button/Select-Klick (normale Component-Interaction) funktioniert es dagegen.
         await interaction.response.send_message(
             content=f"{len(matches)} Treffer - welches Team?", view=TeamBanView(matches), ephemeral=True
         )
