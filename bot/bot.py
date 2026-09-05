@@ -31,6 +31,7 @@ INITIAL_COGS = [
     "cogs.friendlies",
     "cogs.polls",
     "cogs.staff_overview",
+    "cogs.substitutes",
 ]
 
 
