@@ -84,6 +84,31 @@ def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int) -> 
     return active
 
 
+def bracket_size_progression_text(min_teams: int, max_teams: int, total_signups: int) -> str:
+    """Zeigt konkret, ab wie vielen Anmeldungen das Turnier auf welche Groesse waechst -
+    damit Teams verstehen, warum ihre Anmeldung das Turnier ggf. noch vergroessert, statt
+    nur den vagen Hinweis 'die Groesse waechst automatisch' zu lesen."""
+    candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
+    if not candidates:
+        return ""
+    active = compute_bracket_size(total_signups, min_teams, max_teams)
+    lines = ["### 📈 Wie die Turniergröße wächst"]
+    for size in candidates:
+        gsize = group_size_for(size)
+        num_groups = size // gsize
+        marker = "👉" if size == active else "  "
+        status = " ← **aktuell**" if size == active else ""
+        lines.append(f"{marker} `ab {size} Teams` — {num_groups} Gruppen à {gsize} Teams{status}")
+    next_size = next((s for s in candidates if s > active), None)
+    if next_size:
+        missing = next_size - total_signups
+        if missing > 0:
+            lines.append(f"\n-# Noch **{missing}** Anmeldung{'en' if missing != 1 else ''} bis zur nächsten Stufe ({next_size} Teams).")
+    else:
+        lines.append(f"\n-# Maximalgröße erreicht ({max_teams} Teams).")
+    return "\n".join(lines)
+
+
 async def get_tournament(tournament_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM tournaments WHERE id = $1", tournament_id)
@@ -2409,12 +2434,11 @@ class TournamentPanel(discord.ui.LayoutView):
                 team_lines.append(f"`{i}.` {team['name']} (<@{team['owner_discord_id']}>)")
         team_block = discord.ui.TextDisplay("\n".join(team_lines))
 
-        # Block: Erklaerungstext (nach den Buttons)
-        explanation = discord.ui.TextDisplay(
-            "-# Die Turniergröße wächst automatisch mit den Anmeldungen — jede weitere Anmeldung kann das Turnier "
-            "also noch größer machen. Passt ein Team nicht mehr in die aktuelle Stufe, wartet es auf der Warteliste "
-            "und rückt nach, sobald genug Anmeldungen für die nächste Stufe da sind."
-        )
+        # Block: konkrete Wachstumsstufen (VOR der Teamliste, damit klar ist, warum sich die
+        # Groesse noch aendern kann, bevor man die aktuelle Teamliste anschaut - Buttons landen
+        # dadurch automatisch weiter unten in der Nachricht, nicht gleich am Anfang).
+        progression_text = bracket_size_progression_text(t["min_teams"], t["max_teams"], total_signups)
+        progression_block = discord.ui.TextDisplay(progression_text) if progression_text else None
 
         closed = t["status"] != "open"
         items = []
@@ -2425,6 +2449,9 @@ class TournamentPanel(discord.ui.LayoutView):
         if schedule_block:
             items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
             items.append(schedule_block)
+        if progression_block:
+            items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
+            items.append(progression_block)
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
         items.append(team_block)
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
@@ -2467,8 +2494,6 @@ class TournamentPanel(discord.ui.LayoutView):
                 ),
             )
         )
-        items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
-        items.append(explanation)
         container = discord.ui.Container(*items, accent_color=discord.Color.gold())
         self.add_item(container)
 
