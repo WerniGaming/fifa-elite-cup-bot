@@ -30,6 +30,7 @@ INITIAL_COGS = [
     "cogs.feedback",
     "cogs.friendlies",
     "cogs.polls",
+    "cogs.staff_overview",
 ]
 
 
