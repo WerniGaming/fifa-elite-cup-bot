@@ -111,7 +111,12 @@ async def create_ticket_channel(
         )
         return
 
-    category_channel = interaction.guild.get_channel(settings["ticket_category_id"])
+    # Bewerbungen laufen in einer eigenen, nur fuer Verwaltung sichtbaren Kategorie - alle
+    # anderen Ticket-Arten in der normalen Ticket-Kategorie.
+    if category_key == "bewerbung" and settings.get("verwaltung_ticket_category_id"):
+        category_channel = interaction.guild.get_channel(settings["verwaltung_ticket_category_id"])
+    else:
+        category_channel = interaction.guild.get_channel(settings["ticket_category_id"])
     if category_channel is None:
         await interaction.followup.send(view=error_embed("Ticket-Kategorie nicht gefunden. Bitte Admin kontaktieren."), ephemeral=True)
         return
@@ -127,8 +132,18 @@ async def create_ticket_channel(
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
             interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
-        if settings["ticket_support_role_id"]:
-            role = interaction.guild.get_role(settings["ticket_support_role_id"])
+        # Je nach Kategorie unterschiedliche Sichtbarkeit: Bewerbungen nur Verwaltung,
+        # Sperren-Einspruch ab Head Moderator, alles andere das komplette Support-Team.
+        if category_key == "bewerbung":
+            support_role_ids = settings.get("bewerbung_role_ids") or []
+        elif category_key == "sperre":
+            support_role_ids = settings.get("sperre_role_ids") or []
+        else:
+            support_role_ids = settings.get("cup_staff_role_ids") or (
+                [settings["ticket_support_role_id"]] if settings.get("ticket_support_role_id") else []
+            )
+        for role_id in support_role_ids:
+            role = interaction.guild.get_role(role_id)
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 

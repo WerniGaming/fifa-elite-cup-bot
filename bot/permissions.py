@@ -55,11 +55,18 @@ async def can_correct_results(member: discord.Member) -> bool:
 
 
 async def is_ticket_support(member: discord.Member) -> bool:
-    """Admin ODER die separate Ticket-Support-Rolle (z.B. fuer Moderatoren ohne vollen Admin-Zugriff)."""
+    """Admin ODER die separate Ticket-Support-Rolle ODER einer der Cup-Staff-Raenge (Trial
+    Moderator und aufwaerts duerfen alle Tickets bearbeiten, die sie sehen koennen - welche
+    Kategorien sie ueberhaupt sehen, steuert bereits die Kanal-Sichtbarkeit beim Erstellen)."""
     if await is_tournament_admin(member):
         return True
     pool = get_pool()
-    row = await pool.fetchrow("SELECT ticket_support_role_id FROM guild_settings WHERE guild_id = $1", member.guild.id)
-    if not row or not row["ticket_support_role_id"]:
+    row = await pool.fetchrow(
+        "SELECT ticket_support_role_id, cup_staff_role_ids FROM guild_settings WHERE guild_id = $1", member.guild.id
+    )
+    if not row:
         return False
-    return any(r.id == row["ticket_support_role_id"] for r in member.roles)
+    role_ids = {r.id for r in member.roles}
+    if row["ticket_support_role_id"] and row["ticket_support_role_id"] in role_ids:
+        return True
+    return bool(row["cup_staff_role_ids"]) and any(rid in role_ids for rid in row["cup_staff_role_ids"])
