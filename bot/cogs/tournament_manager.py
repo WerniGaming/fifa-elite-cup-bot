@@ -1113,8 +1113,9 @@ async def grant_live_tournament_access(guild: discord.Guild, team_id: int, membe
 async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     """
     Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Zeigt Tabelle +
-    Spielplan-Grafik direkt, ohne vorherigen "Team ist da"-Aktivitaetscheck (auf
-    Owner-Wunsch entfernt - blockierte vorher Spieltag 1, bis alle bestaetigt hatten).
+    Spielplan-Grafik + einen rein informativen "Team ist da"-Status (blockiert NICHTS
+    mehr - die fruehere Version verhinderte die Spieltag-1-Freigabe, bis alle bestaetigt
+    hatten, das war der Kritikpunkt, nicht das Anzeigen selbst).
     Die Spielplan-Grafik wird per MediaGallery eingebettet (view.schedule_file
     muss vom Aufrufer zusaetzlich in files= mitgegeben werden).
     """
@@ -1126,9 +1127,22 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     media = discord.ui.MediaGallery(discord.MediaGalleryItem(media="attachment://spielplan.png"))
 
     standings_text = await build_group_standings_text(group_id)
+
+    team_rows = await pool.fetch(
+        "SELECT tgt.team_id, tgt.confirmed_ready, te.name FROM tournament_group_teams tgt "
+        "JOIN teams te ON te.id = tgt.team_id WHERE tgt.group_id = $1 ORDER BY te.name",
+        group_id,
+    )
+    confirmed = [r for r in team_rows if r["confirmed_ready"]]
+    ready_lines = [f"### ✅ Team ist da ({len(confirmed)}/{len(team_rows)})"]
+    for r in team_rows:
+        ready_lines.append(f"{'✅' if r['confirmed_ready'] else '🔴'} {r['name']}")
+
     container = discord.ui.Container(
         discord.ui.TextDisplay(standings_text),
         media,
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+        discord.ui.TextDisplay("\n".join(ready_lines)),
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
@@ -1151,6 +1165,9 @@ def build_group_actions_view(group_id: int) -> discord.ui.LayoutView:
             discord.ui.Button(label="Gespielt", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:played"),
             discord.ui.Button(label="Ergebnis eintragen", style=discord.ButtonStyle.primary, custom_id=f"groupaction:{group_id}:report"),
             discord.ui.Button(label="Größenvideo anfordern", style=discord.ButtonStyle.secondary, custom_id=f"groupaction:{group_id}:sizevideo"),
+        ),
+        discord.ui.ActionRow(
+            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
         ),
         accent_color=discord.Color.gold(),
     )
