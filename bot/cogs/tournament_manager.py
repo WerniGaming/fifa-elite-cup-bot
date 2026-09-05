@@ -1143,6 +1143,9 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
         media,
         discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
         discord.ui.TextDisplay("\n".join(ready_lines)),
+        discord.ui.ActionRow(
+            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
+        ),
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
@@ -1165,9 +1168,6 @@ def build_group_actions_view(group_id: int) -> discord.ui.LayoutView:
             discord.ui.Button(label="Gespielt", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:played"),
             discord.ui.Button(label="Ergebnis eintragen", style=discord.ButtonStyle.primary, custom_id=f"groupaction:{group_id}:report"),
             discord.ui.Button(label="Größenvideo anfordern", style=discord.ButtonStyle.secondary, custom_id=f"groupaction:{group_id}:sizevideo"),
-        ),
-        discord.ui.ActionRow(
-            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
         ),
         accent_color=discord.Color.gold(),
     )
@@ -2818,8 +2818,11 @@ class TournamentCog(commands.Cog):
                 "UPDATE tournament_group_teams SET confirmed_ready = true WHERE group_id = $1 AND team_id = $2",
                 group_id, team["id"],
             )
-            await refresh_group_panel(self.bot, group_id)
+            # ERST antworten, DANN das (Grafik-lastige, potenziell langsame) Panel aktualisieren -
+            # sonst laeuft das 3-Sekunden-Interaktionsfenster ab, bevor geantwortet wird
+            # ("Unknown interaction"), live beobachtet bei mehreren gleichzeitigen Klicks.
             await interaction.response.send_message(view=success_embed(f"{team['name']} ist bereit! ✅"), ephemeral=True)
+            await refresh_group_panel(self.bot, group_id)
 
         elif action == "report":
             if is_admin:
