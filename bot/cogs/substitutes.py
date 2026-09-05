@@ -1,12 +1,16 @@
 """
-Aushilfen-System: Spieler ohne Team koennen sich als Ersatzspieler ("Aushilfe")
-anbieten (Positionen, Cup-Erfahrung, Liga-Erfahrung), Teams koennen gezielt
-danach suchen ODER selbst eine Anfrage stellen ("Wir suchen eine Aushilfe fuer
-Position X"). Kontakt laeuft ueber eine DM-Vorstellung, kein direkter
-Nummern-/Handle-Austausch im oeffentlichen Kanal noetig.
+Aushilfen-Cog: EIN einziges, live aktualisiertes Uebersichts-Panel (gleiches Prinzip
+wie das Freundschaftsspiel-Panel) statt einer eigenen Nachricht pro Angebot/Anfrage -
+sonst verschwindet das Panel mit den Buttons nach oben.
 
-Alles in EINEM sich selbst aktualisierenden Panel (Components V2), analog zum
-Freundschaftsspiel-Panel - keine Nachrichtenflut im Kanal.
+Zwei Kategorien in einem Panel:
+- "Aushilfen bieten sich an": Spieler ohne Team listen Position(en) + Erfahrung,
+  Teams bewerben sich per Dropdown darauf.
+- "Teams suchen eine Aushilfe": Teams schreiben Position(en) + Beschreibung aus,
+  Spieler bewerben sich per Dropdown darauf.
+
+In beiden Faellen waehlt der Ersteller (Spieler bzw. Team) ueber "Meine Einträge"
+aus den Bewerbern eine Seite aus - danach bekommen beide eine DM mit Kontakt.
 """
 from __future__ import annotations
 import os
@@ -16,8 +20,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from db import get_pool
-from cogs.team_manager import get_team_for_user
-from ui_helpers import success_embed, error_embed, info_embed
+from permissions import is_tournament_admin
+from ui_helpers import error_embed
+from cogs.team_manager import get_team_for_user, get_team_managers
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
@@ -41,90 +46,142 @@ EXPERIENCE_LEVELS = [
 ]
 EXPERIENCE_LABELS = dict(EXPERIENCE_LEVELS)
 
-MAX_LISTED_OFFERS = 20
-
 
 def position_text(positions: list[str]) -> str:
     return " · ".join(POSITION_LABELS.get(p, p) for p in positions)
 
 
-async def get_active_offers(guild_id: int) -> list[dict]:
-    pool = get_pool()
+def truncate(text: str, n: int) -> str:
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+# ---------- Datenzugriff ----------
+
+async def fetch_open_offers(pool, guild_id: int) -> list[dict]:
     rows = await pool.fetch(
-        "SELECT * FROM substitute_offers WHERE guild_id = $1 AND active = true ORDER BY created_at DESC LIMIT $2",
-        guild_id, MAX_LISTED_OFFERS,
+        "SELECT * FROM substitute_offers WHERE guild_id = $1 AND status = 'open' ORDER BY created_at", guild_id
     )
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        count = await pool.fetchval("SELECT COUNT(*) FROM substitute_offer_candidates WHERE offer_id = $1", r["id"])
+        result.append({**dict(r), "candidate_count": count})
+    return result
 
 
-async def build_substitute_panel(guild: discord.Guild) -> discord.ui.LayoutView:
-    offers = await get_active_offers(guild.id)
-
-    intro = discord.ui.TextDisplay(
-        "# 🔄 Aushilfen-Börse\n"
-        "Kein Team, aber Bock zu spielen? Biete dich als Aushilfe an. Team braucht kurzfristig "
-        "Verstärkung? Sucht gezielt oder stellt eine Anfrage — der Kontakt läuft diskret per DM."
+async def fetch_open_requests(pool, guild_id: int) -> list[dict]:
+    rows = await pool.fetch(
+        "SELECT sr.*, t.name AS team_name FROM substitute_requests sr JOIN teams t ON t.id = sr.team_id "
+        "WHERE sr.guild_id = $1 AND sr.status = 'open' ORDER BY sr.created_at",
+        guild_id,
     )
+    result = []
+    for r in rows:
+        count = await pool.fetchval("SELECT COUNT(*) FROM substitute_request_candidates WHERE request_id = $1", r["id"])
+        result.append({**dict(r), "candidate_count": count})
+    return result
 
-    if offers:
-        lines = [f"### 🙋 Aktuell verfügbar ({len(offers)})"]
+
+# ---------- Panel-Aufbau ----------
+
+def build_panel_view(offers: list[dict], requests: list[dict]) -> discord.ui.LayoutView:
+    items: list = [
+        discord.ui.TextDisplay(
+            "# 🔄 Aushilfen-Börse\n"
+            "-# Kein Team, aber Bock zu spielen? Oder ein Team braucht kurzfristig Verstärkung? Hier trifft man sich."
+        ),
+        discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+    ]
+
+    apply_offer_options, apply_request_options = [], []
+
+    items.append(discord.ui.TextDisplay(f"### 🙋 Aushilfen bieten sich an ({len(offers)})"))
+    if not offers:
+        items.append(discord.ui.TextDisplay("_Aktuell bietet sich niemand an - sei die/der Erste!_"))
+    else:
         for o in offers:
             exp = f"Cup: {EXPERIENCE_LABELS.get(o['cup_experience'], '?')} · Liga: {EXPERIENCE_LABELS.get(o['league_experience'], '?')}"
-            lines.append(f"> <@{o['discord_id']}> — {position_text(o['positions'])}\n> -# {exp}")
-        offers_block = discord.ui.TextDisplay("\n".join(lines))
+            cand_txt = f" · {o['candidate_count']} Interessent(en)" if o["candidate_count"] else ""
+            lines = [f"> <@{o['discord_id']}> — {position_text(o['positions'])}{cand_txt}", f"> -# {exp}"]
+            if o["note"]:
+                lines.append(f"> 📝 {o['note']}")
+            items.append(discord.ui.TextDisplay("\n".join(lines)))
+            apply_offer_options.append(discord.SelectOption(
+                label=truncate(f"Aushilfe: {position_text(o['positions'])}", 100), value=str(o["id"]),
+            ))
+
+    items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+    items.append(discord.ui.TextDisplay(f"### 📢 Teams suchen eine Aushilfe ({len(requests)})"))
+    if not requests:
+        items.append(discord.ui.TextDisplay("_Aktuell sucht kein Team - schreib gern eine Anfrage aus!_"))
     else:
-        offers_block = discord.ui.TextDisplay("### 🙋 Aktuell verfügbar\n_Gerade bietet sich niemand an — sei der/die Erste!_")
+        for r in requests:
+            cand_txt = f" · {r['candidate_count']} Bewerber" if r["candidate_count"] else ""
+            lines = [f"> **{r['team_name']}** sucht {position_text(r['positions'])}{cand_txt}"]
+            if r["description"]:
+                lines.append(f"> 📝 {r['description']}")
+            items.append(discord.ui.TextDisplay("\n".join(lines)))
+            apply_request_options.append(discord.SelectOption(
+                label=truncate(f"{r['team_name']} — {position_text(r['positions'])}", 100), value=str(r["id"]),
+            ))
 
-    actions = discord.ui.ActionRow(
+    items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
+    if apply_offer_options:
+        items.append(discord.ui.ActionRow(discord.ui.Select(
+            placeholder="Als Team für eine Aushilfe bewerben...", custom_id="sub:apply_offer",
+            options=apply_offer_options[:25],
+        )))
+    if apply_request_options:
+        items.append(discord.ui.ActionRow(discord.ui.Select(
+            placeholder="Als Spieler auf eine Team-Anfrage bewerben...", custom_id="sub:apply_request",
+            options=apply_request_options[:25],
+        )))
+    items.append(discord.ui.ActionRow(
         discord.ui.Button(label="Als Aushilfe anbieten", emoji="🙋", style=discord.ButtonStyle.success, custom_id="sub:offer_start"),
-        discord.ui.Button(label="Aushilfe finden", emoji="🔍", style=discord.ButtonStyle.primary, custom_id="sub:find_start"),
-    )
-    actions2 = discord.ui.ActionRow(
-        discord.ui.Button(label="Team sucht Aushilfe", emoji="📢", style=discord.ButtonStyle.secondary, custom_id="sub:request_start"),
-        discord.ui.Button(label="Mein Angebot zurückziehen", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="sub:withdraw"),
-    )
+        discord.ui.Button(label="Team sucht Aushilfe", emoji="📢", style=discord.ButtonStyle.primary, custom_id="sub:request_start"),
+        discord.ui.Button(label="Meine Einträge", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="sub:mine"),
+    ))
 
-    container = discord.ui.Container(
-        intro,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
-        offers_block,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
-        actions,
-        actions2,
-        accent_color=discord.Color.blurple(),
-    )
     view = discord.ui.LayoutView(timeout=None)
-    view.add_item(container)
+    view.add_item(discord.ui.Container(*items, accent_color=discord.Color.blurple()))
     return view
 
 
 async def refresh_substitute_panel(bot: commands.Bot, guild: discord.Guild):
     pool = get_pool()
-    row = await pool.fetchrow("SELECT substitute_channel_id, substitute_panel_message_id FROM guild_settings WHERE guild_id = $1", guild.id)
-    if not row or not row["substitute_channel_id"] or not row["substitute_panel_message_id"]:
+    settings = await pool.fetchrow("SELECT substitute_channel_id, substitute_panel_message_id FROM guild_settings WHERE guild_id = $1", guild.id)
+    if not settings or not settings["substitute_channel_id"]:
         return
-    channel = bot.get_channel(row["substitute_channel_id"])
+    channel = guild.get_channel(settings["substitute_channel_id"])
     if channel is None:
         try:
-            channel = await bot.fetch_channel(row["substitute_channel_id"])
+            channel = await guild.fetch_channel(settings["substitute_channel_id"])
         except discord.HTTPException:
             return
+
+    if settings["substitute_panel_message_id"]:
+        try:
+            old_msg = await channel.fetch_message(settings["substitute_panel_message_id"])
+            await old_msg.delete()
+        except discord.HTTPException:
+            pass
+
+    offers = await fetch_open_offers(pool, guild.id)
+    requests = await fetch_open_requests(pool, guild.id)
+    view = build_panel_view(offers, requests)
     try:
-        msg = await channel.fetch_message(row["substitute_panel_message_id"])
-    except discord.HTTPException:
-        return
-    view = await build_substitute_panel(guild)
-    try:
-        await msg.edit(view=view)
+        msg = await channel.send(view=view)
+        await pool.execute("UPDATE guild_settings SET substitute_panel_message_id = $1 WHERE guild_id = $2", msg.id, guild.id)
     except discord.HTTPException:
         pass
 
 
-class PositionExperienceSelectView(discord.ui.View):
-    """Zwischenschritt vor jedem Modal: Discord-Modals koennen keine Select-Menus enthalten,
-    deshalb hier erst Positionen + Erfahrung per Select waehlen, dann per Button ins Modal."""
+# ---------- Zwischenschritt: Position(en) + evtl. Erfahrung waehlen, dann Modal ----------
 
-    def __init__(self, *, ask_experience: bool, continue_label: str):
+class PositionSelectView(discord.ui.View):
+    """Discord-Modals koennen keine Select-Menus enthalten, deshalb hier erst Positionen
+    (+ bei einem Angebot Erfahrung) per Select waehlen, danach per Button ins Modal."""
+
+    def __init__(self, *, ask_experience: bool):
         super().__init__(timeout=180)
         self.positions: list[str] = []
         self.cup_experience: str | None = None
@@ -132,8 +189,7 @@ class PositionExperienceSelectView(discord.ui.View):
         self.ask_experience = ask_experience
 
         pos_select = discord.ui.Select(
-            placeholder="Position(en) wählen...",
-            min_values=1, max_values=len(POSITIONS),
+            placeholder="Position(en) wählen...", min_values=1, max_values=len(POSITIONS),
             options=[discord.SelectOption(label=lbl, value=key) for key, lbl in POSITIONS],
         )
         pos_select.callback = self._on_positions
@@ -141,20 +197,18 @@ class PositionExperienceSelectView(discord.ui.View):
 
         if ask_experience:
             cup_select = discord.ui.Select(
-                placeholder="Cup-Erfahrung (wie viele Cups schon gespielt?)...",
-                options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
+                placeholder="Cup-Erfahrung...", options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
             )
             cup_select.callback = self._on_cup_exp
             self.add_item(cup_select)
 
             league_select = discord.ui.Select(
-                placeholder="Liga-Erfahrung...",
-                options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
+                placeholder="Liga-Erfahrung...", options=[discord.SelectOption(label=lbl, value=key) for key, lbl in EXPERIENCE_LEVELS],
             )
             league_select.callback = self._on_league_exp
             self.add_item(league_select)
 
-        self.continue_button = discord.ui.Button(label=continue_label, style=discord.ButtonStyle.success, disabled=True)
+        self.continue_button = discord.ui.Button(label="Weiter", style=discord.ButtonStyle.success, disabled=True)
         self.continue_button.callback = self._on_continue
         self.add_item(self.continue_button)
 
@@ -181,7 +235,7 @@ class PositionExperienceSelectView(discord.ui.View):
         if self.ask_experience:
             await interaction.response.send_modal(OfferNoteModal(self.positions, self.cup_experience, self.league_experience))
         else:
-            await interaction.response.send_modal(RequestDetailsModal(self.positions))
+            await interaction.response.send_modal(RequestDescriptionModal(self.positions))
 
 
 class OfferNoteModal(discord.ui.Modal, title="Als Aushilfe anbieten"):
@@ -198,25 +252,29 @@ class OfferNoteModal(discord.ui.Modal, title="Als Aushilfe anbieten"):
 
     async def on_submit(self, interaction: discord.Interaction):
         pool = get_pool()
-        await pool.execute("UPDATE substitute_offers SET active = false WHERE guild_id = $1 AND discord_id = $2", interaction.guild_id, interaction.user.id)
+        existing = await pool.fetchrow(
+            "SELECT 1 FROM substitute_offers WHERE guild_id = $1 AND discord_id = $2 AND status = 'open'",
+            interaction.guild_id, interaction.user.id,
+        )
+        if existing:
+            await interaction.response.send_message(
+                view=error_embed("Du hast bereits ein offenes Angebot.", "Zieh es über 'Meine Einträge' zurück, um ein neues zu erstellen."),
+                ephemeral=True,
+            )
+            return
         await pool.execute(
-            """
-            INSERT INTO substitute_offers (guild_id, discord_id, positions, cup_experience, league_experience, note)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            """,
+            "INSERT INTO substitute_offers (guild_id, discord_id, positions, cup_experience, league_experience, note) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
             interaction.guild_id, interaction.user.id, self.positions, self.cup_experience, self.league_experience,
             self.note_input.value or None,
         )
+        await interaction.response.send_message(content=f"✅ Du bist jetzt als Aushilfe gelistet ({position_text(self.positions)}).", ephemeral=True)
         await refresh_substitute_panel(interaction.client, interaction.guild)
-        await interaction.response.send_message(
-            view=success_embed("Du bist jetzt als Aushilfe gelistet!", f"Positionen: {position_text(self.positions)}"),
-            ephemeral=True,
-        )
 
 
-class RequestDetailsModal(discord.ui.Modal, title="Aushilfe gesucht"):
+class RequestDescriptionModal(discord.ui.Modal, title="Aushilfe gesucht"):
     description_input = discord.ui.TextInput(
-        label="Kurze Beschreibung", style=discord.TextStyle.paragraph, max_length=300,
+        label="Beschreibung (optional)", style=discord.TextStyle.paragraph, required=False, max_length=300,
         placeholder="z.B. für heute Abend, dringend, welches Turnier, usw.",
     )
 
@@ -226,105 +284,153 @@ class RequestDetailsModal(discord.ui.Modal, title="Aushilfe gesucht"):
 
     async def on_submit(self, interaction: discord.Interaction):
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        team_name = team["name"] if team else interaction.user.display_name
-
+        if not team:
+            await interaction.response.send_message(
+                view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
+            )
+            return
         pool = get_pool()
-        row = await pool.fetchrow("SELECT substitute_channel_id FROM guild_settings WHERE guild_id = $1", interaction.guild_id)
-        channel = interaction.channel
-        if row and row["substitute_channel_id"]:
-            ch = interaction.client.get_channel(row["substitute_channel_id"])
-            if ch:
-                channel = ch
-
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(
-                f"### 📢 {team_name} sucht eine Aushilfe\n"
-                f"**Position(en):** {position_text(self.positions)}\n"
-                f"{self.description_input.value}\n\n"
-                f"-# Gesucht von <@{interaction.user.id}>"
-            ),
-            discord.ui.ActionRow(discord.ui.Button(
-                label="Ich hab Interesse", emoji="🙋", style=discord.ButtonStyle.success,
-                custom_id=f"sub:respond:{interaction.user.id}",
-            )),
-            accent_color=discord.Color.orange(),
-        ))
-        await channel.send(view=view)
-        await interaction.response.send_message(view=success_embed("Anfrage gepostet!"), ephemeral=True)
+        existing = await pool.fetchrow(
+            "SELECT 1 FROM substitute_requests WHERE guild_id = $1 AND team_id = $2 AND status = 'open'",
+            interaction.guild_id, team["id"],
+        )
+        if existing:
+            await interaction.response.send_message(
+                view=error_embed("Ihr habt bereits eine offene Anfrage.", "Zieh sie über 'Meine Einträge' zurück, um eine neue zu erstellen."),
+                ephemeral=True,
+            )
+            return
+        await pool.execute(
+            "INSERT INTO substitute_requests (guild_id, team_id, requested_by_discord_id, positions, description) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            interaction.guild_id, team["id"], interaction.user.id, self.positions, self.description_input.value or None,
+        )
+        await interaction.response.send_message(content=f"✅ Anfrage erstellt ({position_text(self.positions)}).", ephemeral=True)
         await refresh_substitute_panel(interaction.client, interaction.guild)
 
 
-class SubstituteFindSelect(discord.ui.View):
-    def __init__(self, offers: list[dict]):
-        super().__init__(timeout=180)
-        select = discord.ui.Select(
-            placeholder="Aushilfe auswählen, um Kontakt aufzunehmen...",
-            options=[
-                discord.SelectOption(
-                    label=f"Aushilfe #{o['id']}",
-                    description=f"{position_text(o['positions'])[:90]}",
-                    value=str(o["id"]),
-                )
-                for o in offers
-            ],
-        )
-        select.callback = self.on_select
-        self.add_item(select)
+# ---------- "Meine Einträge" (ephemeral) ----------
 
-    async def on_select(self, interaction: discord.Interaction):
+class MyEntriesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @classmethod
+    async def build(cls, pool, guild_id: int, user_id: int) -> "MyEntriesView | None":
+        self = cls()
+        has_any = False
+
+        my_offer = await pool.fetchrow(
+            "SELECT * FROM substitute_offers WHERE guild_id = $1 AND discord_id = $2 AND status = 'open'", guild_id, user_id
+        )
+        if my_offer:
+            has_any = True
+            cands = await pool.fetch(
+                "SELECT soc.*, t.name AS team_name FROM substitute_offer_candidates soc JOIN teams t ON t.id = soc.team_id WHERE soc.offer_id = $1",
+                my_offer["id"],
+            )
+            if cands:
+                select = discord.ui.Select(
+                    placeholder=truncate(f"Mein Angebot ({len(cands)} Interessent(en)) — Team wählen", 150),
+                    options=[discord.SelectOption(label=truncate(c["team_name"], 100), value=str(c["team_id"])) for c in cands],
+                )
+                select.callback = self._make_choose_offer_callback(my_offer["id"])
+                self.add_item(select)
+            withdraw_offer = discord.ui.Select(
+                placeholder="Mein Angebot zurückziehen...",
+                options=[discord.SelectOption(label=truncate(f"Angebot: {position_text(my_offer['positions'])}", 100), value=str(my_offer["id"]))],
+            )
+            withdraw_offer.callback = self._withdraw_offer_callback
+            self.add_item(withdraw_offer)
+
+        team = await get_team_for_user(guild_id, user_id)
+        my_requests = await pool.fetch(
+            "SELECT * FROM substitute_requests WHERE guild_id = $1 AND team_id = $2 AND status = 'open'", guild_id, team["id"]
+        ) if team else []
+        for req in my_requests:
+            has_any = True
+            cands = await pool.fetch(
+                "SELECT * FROM substitute_request_candidates WHERE request_id = $1", req["id"]
+            )
+            if cands:
+                select = discord.ui.Select(
+                    placeholder=truncate(f"Anfrage ({len(cands)} Bewerber) — Spieler wählen", 150),
+                    options=[discord.SelectOption(label=f"<@{c['discord_id']}>"[:100] or str(c["discord_id"]), value=str(c["discord_id"])) for c in cands],
+                )
+                select.callback = self._make_choose_request_callback(req["id"])
+                self.add_item(select)
+            withdraw_req = discord.ui.Select(
+                placeholder="Anfrage zurückziehen...",
+                options=[discord.SelectOption(label=truncate(f"Anfrage: {position_text(req['positions'])}", 100), value=str(req["id"]))],
+            )
+            withdraw_req.callback = self._withdraw_request_callback
+            self.add_item(withdraw_req)
+
+        return self if has_any else None
+
+    def _make_choose_offer_callback(self, offer_id: int):
+        async def callback(interaction: discord.Interaction):
+            team_id = int(interaction.data["values"][0])
+            pool = get_pool()
+            candidate = await pool.fetchrow("SELECT * FROM substitute_offer_candidates WHERE offer_id = $1 AND team_id = $2", offer_id, team_id)
+            team = await pool.fetchrow("SELECT * FROM teams WHERE id = $1", team_id)
+            await pool.execute("UPDATE substitute_offers SET status = 'matched', matched_team_id = $1 WHERE id = $2", team_id, offer_id)
+            await refresh_substitute_panel(interaction.client, interaction.guild)
+
+            managers = await get_team_managers(team_id)
+            contact = "\n".join(f"- <@{m['discord_id']}>" for m in managers) or f"<@{candidate['discord_id']}>"
+            try:
+                await interaction.user.send(f"🔄 Du hast dich für **{team['name']}** entschieden!\n\n**Kontakt:**\n{contact}")
+            except discord.HTTPException:
+                pass
+            for m in managers:
+                try:
+                    user = interaction.guild.get_member(m["discord_id"]) or await interaction.client.fetch_user(m["discord_id"])
+                    await user.send(f"🔄 Eure Bewerbung um eine Aushilfe war erfolgreich! Kontakt: <@{interaction.user.id}>")
+                except discord.HTTPException:
+                    pass
+            await interaction.response.edit_message(content=f"✅ **{team['name']}** wurde ausgewählt.", view=None)
+        return callback
+
+    def _make_choose_request_callback(self, request_id: int):
+        async def callback(interaction: discord.Interaction):
+            player_id = int(interaction.data["values"][0])
+            pool = get_pool()
+            request = await pool.fetchrow("SELECT * FROM substitute_requests WHERE id = $1", request_id)
+            team = await pool.fetchrow("SELECT * FROM teams WHERE id = $1", request["team_id"])
+            await pool.execute("UPDATE substitute_requests SET status = 'matched', matched_discord_id = $1 WHERE id = $2", player_id, request_id)
+            await refresh_substitute_panel(interaction.client, interaction.guild)
+
+            managers = await get_team_managers(request["team_id"])
+            contact = "\n".join(f"- <@{m['discord_id']}>" for m in managers)
+            try:
+                player = interaction.guild.get_member(player_id) or await interaction.client.fetch_user(player_id)
+                await player.send(f"🔄 **{team['name']}** möchte dich als Aushilfe!\n\n**Kontakt:**\n{contact}")
+            except discord.HTTPException:
+                pass
+            await interaction.response.edit_message(content=f"✅ <@{player_id}> wurde ausgewählt.", view=None)
+        return callback
+
+    async def _withdraw_offer_callback(self, interaction: discord.Interaction):
         offer_id = int(interaction.data["values"][0])
         pool = get_pool()
-        offer = await pool.fetchrow("SELECT * FROM substitute_offers WHERE id = $1 AND active = true", offer_id)
-        if not offer:
-            await interaction.response.edit_message(content="Dieses Angebot ist nicht mehr aktiv.", view=None)
-            return
+        await pool.execute("UPDATE substitute_offers SET status = 'withdrawn' WHERE id = $1 AND status = 'open'", offer_id)
+        await refresh_substitute_panel(interaction.client, interaction.guild)
+        await interaction.response.edit_message(content="🗑️ Angebot zurückgezogen.", view=None)
 
-        team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-        team_name = team["name"] if team else interaction.user.display_name
+    async def _withdraw_request_callback(self, interaction: discord.Interaction):
+        request_id = int(interaction.data["values"][0])
+        pool = get_pool()
+        await pool.execute("UPDATE substitute_requests SET status = 'withdrawn' WHERE id = $1 AND status = 'open'", request_id)
+        await refresh_substitute_panel(interaction.client, interaction.guild)
+        await interaction.response.edit_message(content="🗑️ Anfrage zurückgezogen.", view=None)
 
-        try:
-            target_user = await interaction.client.fetch_user(offer["discord_id"])
-            await target_user.send(
-                view=info_embed(
-                    "🙋 Ein Team hat Interesse an dir!",
-                    f"**{team_name}** möchte dich als Aushilfe kontaktieren.\n"
-                    f"Melde dich direkt bei <@{interaction.user.id}>!",
-                )
-            )
-            sent = True
-        except discord.HTTPException:
-            sent = False
 
-        if sent:
-            await interaction.response.edit_message(
-                content=f"✅ <@{offer['discord_id']}> wurde per DM benachrichtigt — meldet sich bei dir!", view=None
-            )
-        else:
-            await interaction.response.edit_message(
-                content=f"⚠️ DM konnte nicht zugestellt werden. Versuch's direkt: <@{offer['discord_id']}>", view=None
-            )
-
+# ---------- Cog ----------
 
 class SubstitutesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    @app_commands.command(name="aushilfen_setup", description="Postet die Aushilfen-Börse in diesem Kanal (Admin)")
-    async def aushilfen_setup(self, interaction: discord.Interaction):
-        from permissions import is_tournament_admin
-        if not await is_tournament_admin(interaction.user):
-            await interaction.response.send_message(view=error_embed("Nur Admins können die Aushilfen-Börse einrichten."), ephemeral=True)
-            return
-        view = await build_substitute_panel(interaction.guild)
-        await interaction.response.send_message(view=view)
-        msg = await interaction.original_response()
-        pool = get_pool()
-        await pool.execute(
-            "INSERT INTO guild_settings (guild_id, substitute_channel_id, substitute_panel_message_id) VALUES ($1, $2, $3) "
-            "ON CONFLICT (guild_id) DO UPDATE SET substitute_channel_id = $2, substitute_panel_message_id = $3",
-            interaction.guild_id, interaction.channel_id, msg.id,
-        )
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -333,67 +439,101 @@ class SubstitutesCog(commands.Cog):
         custom_id = interaction.data.get("custom_id", "")
         if not custom_id.startswith("sub:"):
             return
-
-        parts = custom_id.split(":")
-        action = parts[1]
+        action = custom_id.split(":", 1)[1]
+        pool = get_pool()
 
         if action == "offer_start":
             await interaction.response.send_message(
                 content="Welche Position(en) kannst du spielen, und wie viel Erfahrung bringst du mit?",
-                view=PositionExperienceSelectView(ask_experience=True, continue_label="Weiter"),
-                ephemeral=True,
+                view=PositionSelectView(ask_experience=True), ephemeral=True,
             )
 
         elif action == "request_start":
+            team = await get_team_for_user(interaction.guild_id, interaction.user.id)
+            if not team:
+                await interaction.response.send_message(
+                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
+                )
+                return
             await interaction.response.send_message(
                 content="Für welche Position(en) sucht ihr eine Aushilfe?",
-                view=PositionExperienceSelectView(ask_experience=False, continue_label="Weiter"),
-                ephemeral=True,
+                view=PositionSelectView(ask_experience=False), ephemeral=True,
             )
 
-        elif action == "find_start":
-            offers = await get_active_offers(interaction.guild_id)
-            if not offers:
-                await interaction.response.send_message(view=error_embed("Aktuell bietet sich niemand als Aushilfe an."), ephemeral=True)
+        elif action == "apply_offer":
+            offer_id = int(interaction.data["values"][0])
+            offer = await pool.fetchrow("SELECT * FROM substitute_offers WHERE id = $1 AND status = 'open'", offer_id)
+            if not offer:
+                await interaction.response.send_message(view=error_embed("Dieses Angebot ist nicht mehr offen."), ephemeral=True)
                 return
-            await interaction.response.send_message(
-                content="Wen möchtest du kontaktieren?", view=SubstituteFindSelect(offers), ephemeral=True
-            )
-
-        elif action == "withdraw":
-            pool = get_pool()
-            result = await pool.execute(
-                "UPDATE substitute_offers SET active = false WHERE guild_id = $1 AND discord_id = $2 AND active = true",
-                interaction.guild_id, interaction.user.id,
-            )
-            if result.endswith(" 0"):
-                await interaction.response.send_message(view=error_embed("Du hast gerade kein aktives Angebot."), ephemeral=True)
-                return
-            await refresh_substitute_panel(interaction.client, interaction.guild)
-            await interaction.response.send_message(view=success_embed("Dein Angebot wurde zurückgezogen."), ephemeral=True)
-
-        elif action == "respond":
-            requester_id = int(parts[2])
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-            team_name = team["name"] if team else None
-            offer = await get_pool().fetchrow(
-                "SELECT * FROM substitute_offers WHERE guild_id = $1 AND discord_id = $2 AND active = true",
-                interaction.guild_id, interaction.user.id,
-            )
-            extra = f" ({position_text(offer['positions'])})" if offer else ""
-            try:
-                requester = await interaction.client.fetch_user(requester_id)
-                await requester.send(
-                    view=info_embed(
-                        "🙋 Jemand hat sich gemeldet!",
-                        f"<@{interaction.user.id}>{extra} hat Interesse an deiner Aushilfen-Anfrage. Meldet euch!",
-                    )
-                )
-                await interaction.response.send_message(view=success_embed("Gemeldet! Das Team wurde per DM informiert."), ephemeral=True)
-            except discord.HTTPException:
+            if not team:
                 await interaction.response.send_message(
-                    view=info_embed("Konnte keine DM senden", f"Meld dich direkt bei <@{requester_id}>."), ephemeral=True
+                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
                 )
+                return
+            existing = await pool.fetchrow("SELECT 1 FROM substitute_offer_candidates WHERE offer_id = $1 AND team_id = $2", offer_id, team["id"])
+            if existing:
+                await interaction.response.send_message(view=error_embed("Ihr habt euch dafür bereits beworben."), ephemeral=True)
+                return
+            await pool.execute(
+                "INSERT INTO substitute_offer_candidates (offer_id, team_id, discord_id) VALUES ($1, $2, $3)",
+                offer_id, team["id"], interaction.user.id,
+            )
+            await interaction.response.send_message(content=f"✅ Interesse an <@{offer['discord_id']}> hinterlegt.", ephemeral=True)
+            await refresh_substitute_panel(interaction.client, interaction.guild)
+            try:
+                target = interaction.guild.get_member(offer["discord_id"]) or await interaction.client.fetch_user(offer["discord_id"])
+                await target.send(f"🔄 **{team['name']}** hat Interesse an dir als Aushilfe! Wähle über 'Meine Einträge' im Aushilfen-Kanal aus.")
+            except discord.HTTPException:
+                pass
+
+        elif action == "apply_request":
+            request_id = int(interaction.data["values"][0])
+            request = await pool.fetchrow("SELECT * FROM substitute_requests WHERE id = $1 AND status = 'open'", request_id)
+            if not request:
+                await interaction.response.send_message(view=error_embed("Diese Anfrage ist nicht mehr offen."), ephemeral=True)
+                return
+            existing = await pool.fetchrow(
+                "SELECT 1 FROM substitute_request_candidates WHERE request_id = $1 AND discord_id = $2", request_id, interaction.user.id
+            )
+            if existing:
+                await interaction.response.send_message(view=error_embed("Du hast dich dafür bereits beworben."), ephemeral=True)
+                return
+            await pool.execute(
+                "INSERT INTO substitute_request_candidates (request_id, discord_id) VALUES ($1, $2)", request_id, interaction.user.id
+            )
+            await interaction.response.send_message(content="✅ Bewerbung eingetragen.", ephemeral=True)
+            await refresh_substitute_panel(interaction.client, interaction.guild)
+            team = await pool.fetchrow("SELECT * FROM teams WHERE id = $1", request["team_id"])
+            managers = await get_team_managers(request["team_id"])
+            for m in managers:
+                try:
+                    user = interaction.guild.get_member(m["discord_id"]) or await interaction.client.fetch_user(m["discord_id"])
+                    await user.send(f"📋 <@{interaction.user.id}> möchte für **{team['name']}** aushelfen. Wähle über 'Meine Einträge' im Aushilfen-Kanal aus.")
+                except discord.HTTPException:
+                    pass
+
+        elif action == "mine":
+            view = await MyEntriesView.build(pool, interaction.guild_id, interaction.user.id)
+            if not view:
+                await interaction.response.send_message(content="Du hast aktuell kein offenes Angebot oder keine offene Anfrage.", ephemeral=True)
+                return
+            await interaction.response.send_message(content="Deine offenen Einträge:", view=view, ephemeral=True)
+
+    @app_commands.command(name="aushilfen_setup", description="Richtet die Aushilfen-Börse in diesem Kanal ein (Admin)")
+    async def aushilfen_setup(self, interaction: discord.Interaction):
+        if not await is_tournament_admin(interaction.user):
+            await interaction.response.send_message(view=error_embed("Nur Admins können die Aushilfen-Börse einrichten."), ephemeral=True)
+            return
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO guild_settings (guild_id, substitute_channel_id, substitute_panel_message_id) VALUES ($1, $2, NULL) "
+            "ON CONFLICT (guild_id) DO UPDATE SET substitute_channel_id = $2, substitute_panel_message_id = NULL",
+            interaction.guild_id, interaction.channel_id,
+        )
+        await interaction.response.send_message(content="Aushilfen-Börse wird eingerichtet...", ephemeral=True)
+        await refresh_substitute_panel(interaction.client, interaction.guild)
 
 
 async def setup(bot: commands.Bot):
