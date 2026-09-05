@@ -75,7 +75,17 @@ async def fetch_open_requests(pool, guild_id: int) -> list[dict]:
 
 # ---------- Panel-Aufbau ----------
 
-def build_panel_view(offers: list[dict], requests: list[dict]) -> discord.ui.LayoutView:
+async def resolve_display_name(guild: discord.Guild, discord_id: int) -> str:
+    member = guild.get_member(discord_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(discord_id)
+        except discord.HTTPException:
+            return str(discord_id)
+    return member.display_name
+
+
+async def build_panel_view(guild: discord.Guild, offers: list[dict], requests: list[dict]) -> discord.ui.LayoutView:
     items: list = [
         discord.ui.TextDisplay(
             "# 🔄 Aushilfen-Börse\n"
@@ -97,8 +107,9 @@ def build_panel_view(offers: list[dict], requests: list[dict]) -> discord.ui.Lay
             if o["note"]:
                 lines.append(f"> 📝 {o['note']}")
             items.append(discord.ui.TextDisplay("\n".join(lines)))
+            name = await resolve_display_name(guild, o["discord_id"])
             apply_offer_options.append(discord.SelectOption(
-                label=truncate(f"Aushilfe: {position_text(o['positions'])}", 100), value=str(o["id"]),
+                label=truncate(f"Aushilfe: {name}", 100), value=str(o["id"]),
             ))
 
     items.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
@@ -159,7 +170,7 @@ async def refresh_substitute_panel(bot: commands.Bot, guild: discord.Guild):
 
     offers = await fetch_open_offers(pool, guild.id)
     requests = await fetch_open_requests(pool, guild.id)
-    view = build_panel_view(offers, requests)
+    view = await build_panel_view(guild, offers, requests)
     try:
         msg = await channel.send(view=view)
         await pool.execute("UPDATE guild_settings SET substitute_panel_message_id = $1 WHERE guild_id = $2", msg.id, guild.id)
