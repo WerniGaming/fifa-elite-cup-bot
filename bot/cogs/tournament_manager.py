@@ -206,6 +206,67 @@ async def swap_team_for_waitlisted(tournament_id: int, team_id_out: int, team_id
     )
 
 
+async def get_team_group(tournament_id: int, team_id: int) -> dict | None:
+    """Gibt die Gruppe zurueck, in der ein Team gerade spielt - nur relevant, wenn die
+    Gruppenphase schon laeuft (fuer 'Team ersetzen'/'Freilos setzen' NACH Anmeldeschluss)."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT tg.* FROM tournament_groups tg
+        JOIN tournament_group_teams tgt ON tgt.group_id = tg.id
+        WHERE tg.tournament_id = $1 AND tgt.team_id = $2
+        """,
+        tournament_id, team_id,
+    )
+    return dict(row) if row else None
+
+
+async def remove_team_from_group_as_bye(tournament_id: int, group_id: int, team_id: int):
+    """Entfernt ein Team WAEHREND der laufenden Gruppenphase sauber als Freilos - im
+    Unterschied zu withdraw_team_with_forfeits() werden KEINE Forfeit-Siege verteilt.
+    Bereits gespielte Ergebnisse bleiben unveraendert stehen (echte Historie), nur noch
+    offene (pending) Spiele gegen dieses Team werden ersatzlos gestrichen - die Gegner haben
+    an dem Spieltag dann schlicht kein Spiel, statt einen gewerteten Freilos-Sieg zu bekommen."""
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
+        tournament_id, team_id,
+    )
+    await pool.execute(
+        "DELETE FROM tournament_matches WHERE group_id = $1 AND status = 'pending' AND (team1_id = $2 OR team2_id = $2)",
+        group_id, team_id,
+    )
+    await pool.execute("DELETE FROM tournament_group_teams WHERE group_id = $1 AND team_id = $2", group_id, team_id)
+
+
+async def replace_team_in_group(tournament_id: int, group_id: int, team_id_out: int, team_id_in: int):
+    """Ersetzt ein Team WAEHREND der laufenden Gruppenphase durch ein anderes - das neue Team
+    uebernimmt alle noch OFFENEN Spiele (Restspielplan), bereits gespielte Ergebnisse bleiben
+    unter dem alten Team-Namen stehen (Historie bleibt korrekt, kein rueckwirkendes Umschreiben)."""
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
+        tournament_id, team_id_out,
+    )
+    await pool.execute(
+        "INSERT INTO tournament_signups (tournament_id, team_id, status) VALUES ($1, $2, 'registered') "
+        "ON CONFLICT (tournament_id, team_id) DO UPDATE SET status = 'registered'",
+        tournament_id, team_id_in,
+    )
+    await pool.execute(
+        "UPDATE tournament_group_teams SET team_id = $1 WHERE group_id = $2 AND team_id = $3",
+        team_id_in, group_id, team_id_out,
+    )
+    await pool.execute(
+        "UPDATE tournament_matches SET team1_id = $1 WHERE group_id = $2 AND status = 'pending' AND team1_id = $3",
+        team_id_in, group_id, team_id_out,
+    )
+    await pool.execute(
+        "UPDATE tournament_matches SET team2_id = $1 WHERE group_id = $2 AND status = 'pending' AND team2_id = $3",
+        team_id_in, group_id, team_id_out,
+    )
+
+
 async def get_all_teams_for_swap(guild_id: int, tournament_id: int, exclude_team_id: int) -> list[dict]:
     """Alle Teams auf dem Server, die aktuell NICHT bei diesem Turnier registriert sind (fuers Eintauschen)."""
     pool = get_pool()

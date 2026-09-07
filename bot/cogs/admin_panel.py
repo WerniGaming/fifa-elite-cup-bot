@@ -646,9 +646,19 @@ class SwapActionChoiceView(discord.ui.View):
 
     @discord.ui.button(label="Entfernen (Freilos)", style=discord.ButtonStyle.danger)
     async def to_bye(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await swap_team_for_bye(self.tournament_id, self.team_id)
-        await refresh_panel(interaction.client, self.tournament_id)
-        await interaction.response.edit_message(
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        from cogs.tournament_manager import get_team_group, remove_team_from_group_as_bye, refresh_group_panel, refresh_live_schedule
+        group = await get_team_group(self.tournament_id, self.team_id)
+        if group:
+            # Gruppenphase laeuft schon - Team sauber als Freilos raus, ohne Forfeit-Siege
+            # zu verteilen (im Unterschied zu 'Team verlaesst Turnier').
+            await remove_team_from_group_as_bye(self.tournament_id, group["id"], self.team_id)
+            await refresh_group_panel(interaction.client, group["id"])
+            await refresh_live_schedule(interaction.client, interaction.guild, self.tournament_id)
+        else:
+            await swap_team_for_bye(self.tournament_id, self.team_id)
+            await refresh_panel(interaction.client, self.tournament_id)
+        await interaction.edit_original_response(
             content=None, view=success_embed(f"{self.team_name} wurde entfernt, der Platz bleibt frei (Freilos).")
         )
 
@@ -752,11 +762,20 @@ class SwapInSelectView(discord.ui.View):
         self.add_item(select)
 
     async def on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
         team_id_in = int(interaction.data["values"][0])
         team_in_name = self.team_names.get(team_id_in, f"Team {team_id_in}")
-        await swap_team_for_waitlisted(self.tournament_id, self.team_id_out, team_id_in)
-        await refresh_panel(interaction.client, self.tournament_id)
-        await interaction.response.edit_message(
+        from cogs.tournament_manager import get_team_group, replace_team_in_group, refresh_group_panel, refresh_live_schedule
+        group = await get_team_group(self.tournament_id, self.team_id_out)
+        if group:
+            # Gruppenphase laeuft schon - neues Team uebernimmt den Restspielplan direkt.
+            await replace_team_in_group(self.tournament_id, group["id"], self.team_id_out, team_id_in)
+            await refresh_group_panel(interaction.client, group["id"])
+            await refresh_live_schedule(interaction.client, interaction.guild, self.tournament_id)
+        else:
+            await swap_team_for_waitlisted(self.tournament_id, self.team_id_out, team_id_in)
+            await refresh_panel(interaction.client, self.tournament_id)
+        await interaction.edit_original_response(
             content=None, view=success_embed(f"{self.team_out_name} wurde durch {team_in_name} ersetzt.")
         )
 
@@ -1100,12 +1119,12 @@ class TournamentAdminView(discord.ui.View):
     @discord.ui.button(label="Team tauschen", style=discord.ButtonStyle.secondary)
     async def swap_team(self, interaction: discord.Interaction, button: discord.ui.Button):
         t = await get_tournament(self.t["id"])
-        if t.get("phase") != "signup":
+        if t.get("phase") not in ("signup", "groups"):
             await interaction.response.send_message(
                 view=error_embed(
                     "Nicht möglich",
-                    "Team-Tausch ist nur möglich, solange sich das Turnier noch in der Anmeldephase befindet "
-                    "(vor Gruppenphasen-Start).",
+                    "Team-Tausch ist ab der K.-o.-Phase nicht mehr möglich - dafür bitte "
+                    "'Team verlässt Turnier' nutzen (wertet offene Spiele als Forfeit-Niederlage).",
                 ),
                 ephemeral=True,
             )
