@@ -822,6 +822,14 @@ async def finalize_match_result(bot: commands.Bot, guild: discord.Guild, match_i
             await bracket_channel.send("➡️ Vorrunde abgeschlossen, weiter geht's:")
             await release_ko_round(bot, bracket_channel, next_matches, round_label)
             await bracket_channel.send(view=build_bracket_actions_view(match["tournament_id"], bracket))
+        if bracket_meta and bracket_meta["panel_channel_id"]:
+            panel_channel = guild.get_channel(bracket_meta["panel_channel_id"])
+            if panel_channel is None:
+                try:
+                    panel_channel = await guild.fetch_channel(bracket_meta["panel_channel_id"])
+                except discord.HTTPException:
+                    panel_channel = None
+            await _purge_transient_action_messages(panel_channel)
         await refresh_bracket_panel(bot, match["tournament_id"], bracket)
 
     await refresh_live_schedule(bot, guild, match["tournament_id"])
@@ -1589,11 +1597,58 @@ async def send_ko_round_reminder(channel: discord.abc.Messageable, round_label: 
         pass
 
 
+def _walk_components(components):
+    """Traversiert eine Components-V2-Baumstruktur (Container/ActionRow/etc.) rekursiv und
+    liefert jedes einzelne Element (Button, TextDisplay, ...) - Discord.py verschachtelt
+    diese in .children, aber die Tiefe variiert je nach Komponente."""
+    for comp in components:
+        yield comp
+        children = getattr(comp, "children", None)
+        if children:
+            yield from _walk_components(children)
+
+
+_TRANSIENT_MARKERS = (
+    "Größenvideo wurde vom Gegner gefordert",
+    "Die 5 Minuten sind um",
+    "muss jetzt laufen",
+)
+
+
+async def _purge_transient_action_messages(channel: discord.abc.Messageable | None):
+    """Loescht liegen gebliebene Ergebnis-Bestaetigungs-/Groessenvideo-/Zeit-abgelaufen-Karten
+    aus einem Kanal - wird vor jeder neuen Spieltag-/Runden-Freigabe aufgerufen, damit sich
+    das nicht ueber die ganze Turnierdauer im Kanal ansammelt. Rein optisches Aufraeumen,
+    ruehrt keine Datenbank-Daten an - ein noch offenes, unbeantwortetes Bestaetigungs-Match
+    bleibt in der DB weiterhin unbestaetigt, nur die Discord-Karte dazu verschwindet."""
+    if channel is None:
+        return
+    try:
+        async for msg in channel.history(limit=100):
+            if not msg.author.bot or not msg.components:
+                continue
+            elements = list(_walk_components(msg.components))
+            is_transient = any(
+                str(getattr(el, "custom_id", "")).startswith("matchconfirm:") for el in elements
+            )
+            if not is_transient:
+                text = " ".join(getattr(el, "content", "") or "" for el in elements)
+                is_transient = any(marker in text for marker in _TRANSIENT_MARKERS)
+            if is_transient:
+                try:
+                    await msg.delete()
+                except discord.HTTPException:
+                    pass
+    except discord.HTTPException:
+        pass
+
+
 async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, matches: list[dict], round_label: str):
     """
     Postet die Paarungen einer KO-Runde mit EA-Club-Namen, Manager-Erwaehnungen und
     5-Minuten-Timer - analog zu release_matchday() in der Gruppenphase.
     """
+    await _purge_transient_action_messages(channel)
     team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
     real_team_ids = set(tid for tid in team_ids if tid)
     names = await team_name_map(list(real_team_ids))
@@ -1708,6 +1763,15 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
             channel = await guild.fetch_channel(group["channel_id"])
         except discord.HTTPException:
             channel = None
+
+    panel_channel = guild.get_channel(group["panel_channel_id"]) if group["panel_channel_id"] else None
+    if panel_channel is None and group["panel_channel_id"]:
+        try:
+            panel_channel = await guild.fetch_channel(group["panel_channel_id"])
+        except discord.HTTPException:
+            panel_channel = None
+    await _purge_transient_action_messages(channel)
+    await _purge_transient_action_messages(panel_channel)
 
     if channel:
         await channel.send(view=view)
