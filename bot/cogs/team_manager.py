@@ -775,6 +775,10 @@ class CoManagerView(discord.ui.View):
         except Exception:
             await interaction.response.send_message(view=warning_embed(f"{user.mention} ist bereits Manager dieses Teams."), ephemeral=True)
             return
+        # ERST antworten, DANN die (mehreren, teils langsamen) Discord-API-Aufrufe
+        # (Nickname, Rolle, Panel-Neuaufbau) - sonst laeuft das 3-Sekunden-Interaktionsfenster
+        # ab, bevor ueberhaupt geantwortet wird ("Bot reagiert nicht").
+        await interaction.response.defer(ephemeral=True, thinking=True)
         member = await fetch_member_safe(interaction.guild, user.id)
         if member:
             await apply_team_nickname(member, self.team["name"])
@@ -782,7 +786,7 @@ class CoManagerView(discord.ui.View):
             from cogs.tournament_manager import grant_live_tournament_access
             await grant_live_tournament_access(interaction.guild, self.team["id"], member)
         await refresh_team_overview(interaction.client, interaction.guild)
-        await interaction.response.send_message(view=success_embed(f"{user.mention} ist jetzt Co-Manager von {self.team['name']}"), ephemeral=True)
+        await interaction.followup.send(view=success_embed(f"{user.mention} ist jetzt Co-Manager von {self.team['name']}"), ephemeral=True)
 
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Co-Manager entfernen")
     async def remove_comanager(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
@@ -792,13 +796,14 @@ class CoManagerView(discord.ui.View):
         if role == "owner":
             await interaction.response.send_message(view=warning_embed("Der Team-Owner kann hier nicht entfernt werden."), ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await pool.execute("DELETE FROM team_managers WHERE team_id = $1 AND discord_id = $2", self.team["id"], user.id)
         member = await fetch_member_safe(interaction.guild, user.id)
         if member:
             await _toggle_configured_role(interaction.guild, member, "co_manager_role_id", grant=False)
             await reset_team_nickname(member)
         await refresh_team_overview(interaction.client, interaction.guild)
-        await interaction.response.send_message(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
+        await interaction.followup.send(view=success_embed(f"{user.mention} wurde entfernt."), ephemeral=True)
 
 
 class LeaveConfirmView(discord.ui.View):
@@ -908,7 +913,7 @@ class TeamManagerPanel(discord.ui.LayoutView):
             "Zentrale Anlaufstelle für alles rund um deinen Verein im FIFA Elite Cup."
         )
         link_block = discord.ui.TextDisplay(
-            "### 🔗 Team verknüpfen\n"
+            "### 🔗 Team gründen\n"
             "> koppelt deinen EA FC Pro Club mit deinem Discord-Account\n"
             "> der Club-Name wird direkt von der EA API übernommen\n"
             "> optional: Twitch- oder YouTube-Link direkt mit anlegen"
