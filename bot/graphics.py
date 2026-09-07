@@ -485,6 +485,63 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
     return buf
 
 
+PODIUM_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "assets", "podium_template.png")
+
+# Pixel-Koordinaten im podium_template.png (1031x1525) - per Hand am Bild ausgemessen.
+# text_center: Mittelpunkt fuer den Team-Namen auf der jeweiligen Plakette.
+# logo_box: Bounding-Box fuer das Vereinslogo im jeweiligen 'LOGO VEREIN'-Wappen.
+_PODIUM_PHOTO_SPOTS = {
+    1: {"text_center": (515, 1212), "text_max_w": 300, "logo_box": (450, 1330, 580, 1460), "patch_color": (151, 126, 95), "patch_pad": (14, 8)},
+    2: {"text_center": (205, 1144), "text_max_w": 170, "logo_box": (135, 1212, 245, 1352), "patch_color": (122, 72, 48), "patch_pad": (22, 14)},
+    3: {"text_center": (810, 1144), "text_max_w": 170, "logo_box": (785, 1212, 895, 1352), "patch_color": (147, 138, 127), "patch_pad": (22, 14)},
+}
+
+
+def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_w: int, start_size: int, min_size: int = 14) -> ImageFont.FreeTypeFont:
+    size = start_size
+    while size > min_size:
+        font = _font(size)
+        w, _ = _text_size(draw, text, font)
+        if w <= max_w:
+            return font
+        size -= 2
+    return _font(min_size)
+
+
+async def render_podium_photo(places: dict[int, tuple[str, str | None]]) -> io.BytesIO:
+    """Nutzt das fest gestaltete Pokal-Foto (podium_template.png, per /pokal_grafik_setup
+    austauschbar) statt der programmatisch gezeichneten Trophaeen - Team-Namen werden auf
+    die Plaketten geschrieben, Logos in die 'LOGO VEREIN'-Wappen eingesetzt.
+    places: {1: (team_name, logo_url), 2: (...), 3: (...)} - 2/3 optional."""
+    img = Image.open(PODIUM_TEMPLATE_PATH).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    async with aiohttp.ClientSession() as session:
+        for place, spot in _PODIUM_PHOTO_SPOTS.items():
+            if place not in places:
+                continue
+            team_name, logo_url = places[place]
+            cx, cy = spot["text_center"]
+            font = _fit_font(draw, team_name, spot["text_max_w"], start_size=34 if place == 1 else 24)
+            tw, th = _text_size(draw, team_name, font)
+            # Deckt den eingebrannten '(Name)'-Platzhaltertext mit der Plaketten-Farbe ab,
+            # bevor der echte Team-Name draufgeschrieben wird - sonst ueberlagern sich beide Texte.
+            pad_x, pad_y = spot["patch_pad"]
+            draw.rectangle(
+                [(cx - tw / 2 - pad_x, cy - th / 2 - pad_y), (cx + tw / 2 + pad_x, cy + th / 2 + pad_y)],
+                fill=spot["patch_color"],
+            )
+            draw.text((cx - tw / 2, cy - th / 2), team_name, font=font, fill=(35, 22, 8))
+
+            logo = await _fetch_logo(session, logo_url, team_name)
+            _paste_logo(img, logo, spot["logo_box"], label=team_name, ring=False)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 async def render_club_stats_card(
     team_name: str, ea_club_name: str | None, logo_url: str | None,
     division_text: str | None, medals: list[str], record_text: str | None, goals_text: str | None,

@@ -669,13 +669,11 @@ async def get_bracket_podium_places(tournament_id: int, champion_id: int, bracke
 
 async def build_bracket_finish_file(tournament_id: int, champion_id: int, bracket: str) -> discord.File:
     """Podium-Grafik fuer den Bracket-Abschluss: Erster/Zweiter/Dritter (soweit ermittelbar)."""
-    t = await get_tournament(tournament_id)
-    bracket_label = "Winner Bracket" if bracket == "winner" else "Loser Bracket"
     places = await get_bracket_podium_places(tournament_id, champion_id, bracket)
     image_places = {rank: (row["name"], row.get("logo_url")) for rank, row in places.items()}
 
-    from graphics import render_podium_image
-    buf = await render_podium_image(f"{bracket_label} Champion", t["name"], image_places)
+    from graphics import render_podium_photo
+    buf = await render_podium_photo(image_places)
     return discord.File(buf, filename="podium.png")
 
 
