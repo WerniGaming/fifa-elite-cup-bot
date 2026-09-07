@@ -1378,12 +1378,15 @@ async def create_group_panel_channel(guild: discord.Guild, category: discord.Cat
         panel_channel.id, msg.id, group["id"],
     )
 
-    main_channel = guild.get_channel(group.get("channel_id")) if group.get("channel_id") else None
-    if main_channel:
+    # Aktions-Buttons in BEIDE Kanaele (Hauptkanal + Panel-Kanal) - analog zu Groessenvideo/
+    # Ergebnis-Bestaetigung, die ebenfalls in beiden Kanaelen landen.
+    for target_channel in {panel_channel, guild.get_channel(group.get("channel_id")) if group.get("channel_id") else None}:
+        if target_channel is None:
+            continue
         try:
-            await main_channel.send(view=build_group_actions_view(group["id"]))
+            await target_channel.send(view=build_group_actions_view(group["id"]))
         except discord.HTTPException:
-            log.exception(f"Fehler beim erneuten Posten der Aktions-Buttons im Gruppenkanal (Gruppe {group['id']})")
+            log.exception(f"Fehler beim Posten der Aktions-Buttons in Kanal {target_channel.id} (Gruppe {group['id']})")
 
     return panel_channel
 
