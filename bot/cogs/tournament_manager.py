@@ -1181,6 +1181,9 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
         media,
         discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
         discord.ui.TextDisplay("\n".join(ready_lines)),
+        discord.ui.ActionRow(
+            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
+        ),
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
