@@ -487,16 +487,13 @@ async def render_podium_image(title: str, subtitle: str, places: dict[int, tuple
 
 PODIUM_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "assets", "podium_template.png")
 
-# Pixel-Koordinaten im podium_template.png (1031x1525) - per Hand mit Pixel-Gitter-Overlay
-# ausgemessen (siehe Kommentare). text_center: Mittelpunkt der Plakette fuer den Team-Namen.
-# logo_ellipse: (cx, cy, rx, ry) - die Kamera schaut leicht von oben auf die Pokale, die
-# runden Wappen erscheinen deshalb als Ellipsen, keine echten Kreise. rx/ry bewusst etwas
-# kleiner als das goldene Wappen selbst gewaehlt, damit Lorbeerkranz/Krone sichtbar bleiben
-# und das Logo NICHT darueber hinausragt (genau das war vorher zu gross/unpassend).
+# Pixel-Koordinaten im podium_template.png (1031x1525) - per Hand am Bild ausgemessen.
+# text_center: Mittelpunkt fuer den Team-Namen auf der jeweiligen Plakette.
+# logo_box: Bounding-Box fuer das Vereinslogo im jeweiligen 'LOGO VEREIN'-Wappen.
 _PODIUM_PHOTO_SPOTS = {
-    1: {"text_center": (515, 1212), "text_max_w": 300, "logo_ellipse": (540, 1415, 68, 52), "patch_color": (151, 126, 95), "patch_pad": (14, 8)},
-    2: {"text_center": (205, 1144), "text_max_w": 170, "logo_ellipse": (195, 1290, 56, 50), "patch_color": (122, 72, 48), "patch_pad": (22, 14)},
-    3: {"text_center": (865, 1144), "text_max_w": 170, "logo_ellipse": (865, 1282, 56, 48), "patch_color": (147, 138, 127), "patch_pad": (22, 14)},
+    1: {"text_center": (515, 1212), "text_max_w": 300, "logo_box": (450, 1330, 580, 1460), "patch_color": (151, 126, 95), "patch_pad": (14, 8)},
+    2: {"text_center": (205, 1144), "text_max_w": 170, "logo_box": (135, 1212, 245, 1352), "patch_color": (122, 72, 48), "patch_pad": (22, 14)},
+    3: {"text_center": (810, 1144), "text_max_w": 170, "logo_box": (785, 1212, 895, 1352), "patch_color": (147, 138, 127), "patch_pad": (22, 14)},
 }
 
 
@@ -511,51 +508,10 @@ def _fit_font(draw: ImageDraw.ImageDraw, text: str, max_w: int, start_size: int,
     return _font(min_size)
 
 
-def _draw_engraved_text(img: Image.Image, xy: tuple[float, float], text: str, font, base_color: tuple[int, int, int]):
-    """Simuliert eine gepraegte/gravierte Metall-Beschriftung (wie 'FIFA ELITE CUP' auf den
-    Plaketten) statt platter, aufgeklebt wirkender Schrift: dunkler Schlagschatten unten
-    rechts + heller Glanzkante oben links, Haupttext dazwischen."""
-    x, y = xy
-    shadow = tuple(max(0, c - 55) for c in base_color)
-    highlight = tuple(min(255, c + 70) for c in base_color)
-    draw = ImageDraw.Draw(img)
-    draw.text((x + 1, y + 1.5), text, font=font, fill=shadow)
-    draw.text((x - 0.5, y - 0.5), text, font=font, fill=highlight)
-    draw.text((x, y), text, font=font, fill=base_color)
-
-
-def _paste_logo_ellipse(img: Image.Image, logo: Image.Image | None, ellipse: tuple[int, int, int, int], label: str = ""):
-    """Setzt ein Team-Logo elliptisch zugeschnitten ein (statt kreisrund) - passend zur
-    leicht von oben fotografierten Perspektive der Pokal-Wappen. Ohne Logo: dezenter
-    Initialen-Platzhalter in Wappenfarbe statt eines fehlenden Bildes."""
-    cx, cy, rx, ry = ellipse
-    box = (cx - rx, cy - ry, cx + rx, cy + ry)
-    if logo is None:
-        _draw_logo_placeholder(img, box, label, ring=False)
-        return
-    w, h = 2 * rx, 2 * ry
-    lw, lh = logo.size
-    side = min(lw, lh)
-    cx0, cy0 = (lw - side) // 2, (lh - side) // 2
-    logo_copy = logo.crop((cx0, cy0, cx0 + side, cy0 + side)).convert("RGBA")
-    # Auf das Seitenverhaeltnis der Ellipse strecken (object-cover), nicht nur verkleinern -
-    # sonst blieben oben/unten Luecken zum ovalen Wappenrand.
-    logo_copy = logo_copy.resize((int(w), int(h)), Image.LANCZOS)
-    mask = Image.new("L", (int(w), int(h)), 0)
-    ImageDraw.Draw(mask).ellipse([(0, 0), (w - 1, h - 1)], fill=255)
-    # Weicher Rand (2px Blur), damit der Uebergang zum dunklen Wappen nicht hart/aufgeklebt wirkt.
-    mask = mask.filter(ImageFilter.GaussianBlur(1.5))
-    if logo_copy.mode == "RGBA":
-        alpha = logo_copy.split()[3]
-        mask = Image.composite(mask, Image.new("L", (int(w), int(h)), 0), alpha)
-    img.paste(logo_copy, (int(box[0]), int(box[1])), mask)
-
-
 async def render_podium_photo(places: dict[int, tuple[str, str | None]]) -> io.BytesIO:
-    """Nutzt das fest gestaltete Pokal-Foto (podium_template.png) statt der programmatisch
-    gezeichneten Trophaeen - Team-Namen werden auf die Plaketten geschrieben (mit
-    Praege-Effekt, passend zum eingravierten 'FIFA ELITE CUP'-Schriftzug), Logos elliptisch
-    passend zur Kameraperspektive in die 'LOGO VEREIN'-Wappen eingesetzt.
+    """Nutzt das fest gestaltete Pokal-Foto (podium_template.png, per /pokal_grafik_setup
+    austauschbar) statt der programmatisch gezeichneten Trophaeen - Team-Namen werden auf
+    die Plaketten geschrieben, Logos in die 'LOGO VEREIN'-Wappen eingesetzt.
     places: {1: (team_name, logo_url), 2: (...), 3: (...)} - 2/3 optional."""
     img = Image.open(PODIUM_TEMPLATE_PATH).convert("RGB")
     draw = ImageDraw.Draw(img)
@@ -568,21 +524,17 @@ async def render_podium_photo(places: dict[int, tuple[str, str | None]]) -> io.B
             cx, cy = spot["text_center"]
             font = _fit_font(draw, team_name, spot["text_max_w"], start_size=34 if place == 1 else 24)
             tw, th = _text_size(draw, team_name, font)
-            # Deckt den eingebrannten '(Name)'-Platzhaltertext mit der Plaketten-Farbe ab
-            # (weich ausgeblendeter Rand statt hartem Rechteck, damit kein Sticker-Look
-            # entsteht), bevor der echte Team-Name draufgeschrieben wird.
+            # Deckt den eingebrannten '(Name)'-Platzhaltertext mit der Plaketten-Farbe ab,
+            # bevor der echte Team-Name draufgeschrieben wird - sonst ueberlagern sich beide Texte.
             pad_x, pad_y = spot["patch_pad"]
-            patch_box = (cx - tw / 2 - pad_x, cy - th / 2 - pad_y, cx + tw / 2 + pad_x, cy + th / 2 + pad_y)
-            patch = Image.new("RGB", img.size, spot["patch_color"])
-            patch_mask = Image.new("L", img.size, 0)
-            ImageDraw.Draw(patch_mask).rounded_rectangle(patch_box, radius=6, fill=255)
-            patch_mask = patch_mask.filter(ImageFilter.GaussianBlur(2))
-            img.paste(patch, (0, 0), patch_mask)
-            draw = ImageDraw.Draw(img)
-            _draw_engraved_text(img, (cx - tw / 2, cy - th / 2), team_name, font, (35, 22, 8))
+            draw.rectangle(
+                [(cx - tw / 2 - pad_x, cy - th / 2 - pad_y), (cx + tw / 2 + pad_x, cy + th / 2 + pad_y)],
+                fill=spot["patch_color"],
+            )
+            draw.text((cx - tw / 2, cy - th / 2), team_name, font=font, fill=(35, 22, 8))
 
             logo = await _fetch_logo(session, logo_url, team_name)
-            _paste_logo_ellipse(img, logo, spot["logo_ellipse"], label=team_name)
+            _paste_logo(img, logo, spot["logo_box"], label=team_name, ring=False)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
