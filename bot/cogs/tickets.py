@@ -266,8 +266,8 @@ class TicketCloseConfirmView(discord.ui.View):
     @discord.ui.button(label="Ja, schließen", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await close_ticket(interaction.client, interaction.guild, self.ticket_number, interaction.user)
         await interaction.followup.send(view=success_embed("Ticket wird geschlossen..."), ephemeral=True)
+        await close_ticket(interaction.client, interaction.guild, self.ticket_number, interaction.user)
 
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
