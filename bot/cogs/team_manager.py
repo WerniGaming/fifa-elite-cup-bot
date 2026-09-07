@@ -939,7 +939,7 @@ class TeamManagerPanel(discord.ui.LayoutView):
             discord.ui.Separator(),
             note_block,
             discord.ui.ActionRow(
-                discord.ui.Button(label="Team verknüpfen", style=discord.ButtonStyle.primary, custom_id="team:create"),
+                discord.ui.Button(label="Team gründen", style=discord.ButtonStyle.primary, custom_id="team:create"),
                 discord.ui.Button(label="Mein Team", style=discord.ButtonStyle.secondary, custom_id="team:info"),
                 discord.ui.Button(label="Logo", style=discord.ButtonStyle.secondary, custom_id="team:logo"),
             ),
