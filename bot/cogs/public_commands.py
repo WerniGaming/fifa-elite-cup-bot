@@ -183,7 +183,7 @@ class PublicCommandsCog(commands.Cog):
         )
         if not row:
             await interaction.response.send_message(
-                view=error_embed("Du hast kein Team", "Siehe Team-Manager-Panel -> 'Team verknüpfen'."), ephemeral=True
+                view=error_embed("Du hast kein Team", "Siehe Team-Manager-Panel -> 'Team gründen'."), ephemeral=True
             )
             return
         stats = await pool.fetchrow(

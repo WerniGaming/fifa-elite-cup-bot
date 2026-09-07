@@ -3178,7 +3178,7 @@ class TournamentCog(commands.Cog):
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
                 await interaction.response.send_message(
-                    view=error_embed("Du brauchst zuerst ein Team", "siehe Team Manager Panel -> 'Team verknüpfen'."), ephemeral=True
+                    view=error_embed("Du brauchst zuerst ein Team", "siehe Team Manager Panel -> 'Team gründen'."), ephemeral=True
                 )
                 return
 
