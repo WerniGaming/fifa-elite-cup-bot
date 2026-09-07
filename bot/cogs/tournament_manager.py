@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import random
+import zlib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import discord
@@ -2041,25 +2042,52 @@ async def create_bracket(
     bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int],
     category: discord.CategoryChannel | None = None,
 ) -> list[dict]:
-    """Erstellt Rolle+Kanal fuer ein einzelnes Bracket (winner/loser) und die Runde-1-Paarungen."""
+    """Erstellt Rolle+Kanal fuer ein einzelnes Bracket (winner/loser) und die Runde-1-Paarungen.
+
+    Gegen doppelte Ausfuehrung abgesichert (Postgres Advisory-Lock ueber tournament_id+bracket):
+    live beobachtet, dass ein automatischer Trigger (letztes Gruppenspiel bestaetigt) UND ein
+    kurz danach folgender manueller 'KO-Phase starten'-Klick parallel liefen - beide kamen am
+    existing_meta-Check vorbei, weil der automatische Lauf zu dem Zeitpunkt Rolle/Kanal zwar
+    schon anlegte, den bracket_meta-Datenbankeintrag aber erst GANZ AM ENDE schreibt. Ergebnis:
+    zwei 'winner-bracket'-Kanaele/-Rollen, UniqueViolation beim Anlegen der Runde-1-Spiele.
+    Der Advisory-Lock serialisiert das: der zweite Aufruf wartet, bis der erste fertig ist,
+    sieht dann existing_meta und bricht sauber ab, statt ein zweites Mal alles anzulegen."""
     if not team_ids:
         return []
     pool = get_pool()
+    lock_key = zlib.crc32(f"bracket:{tournament_id}:{bracket}".encode()) & 0x7FFFFFFF
 
-    existing_meta = await pool.fetchrow(
-        "SELECT * FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2", tournament_id, bracket
-    )
-    if existing_meta:
-        existing_matches = await pool.fetch(
-            """
-            SELECT * FROM tournament_matches
-            WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2 AND round = 1
-            ORDER BY match_number
-            """,
-            tournament_id, bracket,
-        )
-        return [dict(m) for m in existing_matches]
+    conn = await pool.acquire()
+    try:
+        await conn.execute("SELECT pg_advisory_lock($1)", lock_key)
+        try:
+            existing_meta = await conn.fetchrow(
+                "SELECT * FROM tournament_bracket_meta WHERE tournament_id = $1 AND bracket = $2", tournament_id, bracket
+            )
+            if existing_meta:
+                existing_matches = await conn.fetch(
+                    """
+                    SELECT * FROM tournament_matches
+                    WHERE tournament_id = $1 AND phase = 'knockout' AND bracket = $2 AND round = 1
+                    ORDER BY match_number
+                    """,
+                    tournament_id, bracket,
+                )
+                return [dict(m) for m in existing_matches]
+            return await _create_bracket_locked(bot, guild, tournament_id, t, bracket, team_ids, category)
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
+    finally:
+        await pool.release(conn)
 
+
+async def _create_bracket_locked(
+    bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict, bracket: str, team_ids: list[int],
+    category: discord.CategoryChannel | None,
+) -> list[dict]:
+    """Der eigentliche Erstellungs-Code fuer create_bracket() - laeuft nur, nachdem der
+    Aufrufer den Advisory-Lock geholt und existing_meta erneut geprueft hat."""
+    pool = get_pool()
     # team_ids kommt bereits nach Seed sortiert an (bestes Team zuerst) - siehe
     # start_knockout_phase / _seed_key. NICHT mehr mischen, sonst geht das Seeding verloren.
     team_ids = list(team_ids)
@@ -2084,12 +2112,13 @@ async def create_bracket(
                 try:
                     await member.add_roles(role)
                 except discord.HTTPException:
-                    pass
+                    log.exception(f"Konnte Bracket-Rolle nicht an {member} vergeben (Turnier {tournament_id}, Bracket {bracket})")
 
-    try:
-        await asyncio.wait_for(assign_roles(), timeout=30)
-    except asyncio.TimeoutError:
-        log.error(f"Timeout beim Zuweisen der Rollen fuer Bracket '{bracket}' (Turnier {tournament_id}) - mache trotzdem weiter")
+    # BEWUSST kein wait_for/Timeout mehr drumherum: das brach die Schleife bei vielen Teams
+    # (Discord-Ratelimits) live mittendrin ab - alle Teams NACH dem Timeout bekamen die Rolle
+    # nie. Laeuft jetzt als Hintergrund-Task zuende, egal wie lange es dauert; blockiert dabei
+    # nicht das Anlegen von Kanal/Spielen weiter unten.
+    asyncio.create_task(assign_roles())
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
