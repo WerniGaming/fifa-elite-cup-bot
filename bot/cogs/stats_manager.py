@@ -11,6 +11,8 @@ Hintergrund laufen (Proxy-Traffic, Zeit).
 """
 from __future__ import annotations
 import io
+import logging
+import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -178,6 +180,20 @@ async def capture_match_player_stats(match_id: int, team1_id: int, team2_id: int
                     _position_group(raw_pos),
                 ))
         if not rows:
+            return
+
+        # Plausibilitaets-Check gegen kaputte EA-Matchdaten: bei einem live beobachteten Fall
+        # (Match SGx R3TuRn vs. ReaperX Esports) lieferte EA ein Match mit fast identischen,
+        # unrealistisch flachen Bewertungen fuer alle Spieler (Standardabweichung 0.13) - passte
+        # weder zum eingetragenen Ergebnis noch zu echtem Spielverhalten. Bei genug Spielern UND
+        # verdaechtig geringer Streuung eher kaputte/falsche Daten als ein echtes Spiel - lieber
+        # gar keine Stats erfassen als falsche.
+        ratings = [r[5] for r in rows if r[5] is not None]
+        if len(ratings) >= 8 and statistics.pstdev(ratings) < 0.25:
+            logging.getLogger(__name__).warning(
+                f"Match {match_id}: EA-Spielerdaten wirken kaputt (Bewertungs-Streuung "
+                f"{statistics.pstdev(ratings):.2f} bei {len(ratings)} Spielern) - Stats NICHT erfasst."
+            )
             return
 
         pool = get_pool()
