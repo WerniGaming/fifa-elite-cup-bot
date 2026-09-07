@@ -20,7 +20,10 @@ from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed, WEBSITE_URL
 from permissions import is_tournament_admin, is_tournament_moderator
 from typing import Literal
-from cogs.team_manager import get_team_for_user, get_role_for_user, get_team_managers, is_valid_twitch_link
+from cogs.team_manager import (
+    get_team_for_user, get_team_for_user_in_group, get_team_for_user_in_tournament,
+    get_role_for_user, get_team_managers, is_valid_twitch_link,
+)
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 TOURNAMENT_BANNER_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "tournament_banner.jpg")
@@ -2826,7 +2829,7 @@ class TournamentCog(commands.Cog):
             await interaction.response.send_message(view=error_embed("Gruppe nicht gefunden."), ephemeral=True)
             return
 
-        team = await get_team_for_user(interaction.guild_id, interaction.user.id)
+        team = await get_team_for_user_in_group(group_id, interaction.user.id)
         is_admin = await is_tournament_moderator(interaction.user)
 
         if action == "played":
@@ -2964,7 +2967,7 @@ class TournamentCog(commands.Cog):
             await interaction.response.send_message(view=error_embed("Turnier nicht gefunden."), ephemeral=True)
             return
 
-        team = await get_team_for_user(interaction.guild_id, interaction.user.id)
+        team = await get_team_for_user_in_tournament(tournament_id, interaction.user.id)
         is_admin = await is_tournament_moderator(interaction.user)
 
         if action == "played":

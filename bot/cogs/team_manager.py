@@ -429,6 +429,44 @@ async def get_team_for_user(guild_id: int, user_id: int):
     return row
 
 
+async def get_team_for_user_in_group(group_id: int, user_id: int):
+    """Wie get_team_for_user, aber auf eine Turnier-Gruppe eingeschraenkt - noetig, weil ein
+    Co-Manager Co-Manager MEHRERER Teams sein kann (z.B. als Aushilfe). get_team_for_user
+    liefert dann irgendeines seiner Teams zurueck (ohne ORDER BY), moeglicherweise eines,
+    das gar nicht in dieser Gruppe spielt - dadurch schlug z.B. 'Team ist da' faelschlich
+    mit 'Dein Team ist nicht in dieser Gruppe' fehl, obwohl sein tatsaechliches Team dort war."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT t.* FROM teams t
+        JOIN team_managers tm ON tm.team_id = t.id
+        JOIN tournament_group_teams tgt ON tgt.team_id = t.id
+        WHERE tgt.group_id = $1 AND tm.discord_id = $2
+        """,
+        group_id, user_id,
+    )
+    return row
+
+
+async def get_team_for_user_in_tournament(tournament_id: int, user_id: int):
+    """Wie get_team_for_user_in_group, aber fuer die KO-Phase - schraenkt auf Teams ein,
+    die tatsaechlich ein Match in diesem Turnier haben (aus demselben Grund: ein
+    Co-Manager mehrerer Teams braucht das richtige Team fuer DIESES Turnier)."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT t.* FROM teams t
+        JOIN team_managers tm ON tm.team_id = t.id
+        WHERE tm.discord_id = $2 AND EXISTS (
+            SELECT 1 FROM tournament_matches m
+            WHERE m.tournament_id = $1 AND (m.team1_id = t.id OR m.team2_id = t.id)
+        )
+        """,
+        tournament_id, user_id,
+    )
+    return row
+
+
 async def get_role_for_user(team_id: int, user_id: int) -> str | None:
     pool = get_pool()
     row = await pool.fetchrow(
