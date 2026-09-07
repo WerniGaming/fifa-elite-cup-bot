@@ -135,20 +135,6 @@ async def get_unready_groups(tournament_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_unconfirmed_teams(tournament_id: int) -> list[dict]:
-    pool = get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT te.id, te.name FROM tournament_signups ts
-        JOIN teams te ON te.id = ts.team_id
-        WHERE ts.tournament_id = $1 AND ts.status = 'registered' AND ts.confirmed_active = false
-        ORDER BY ts.signup_time ASC
-        """,
-        tournament_id,
-    )
-    return [dict(r) for r in rows]
-
-
 async def get_signup_counts(tournament_id: int) -> tuple[int, int]:
     pool = get_pool()
     registered = await pool.fetchval(
@@ -1155,9 +1141,11 @@ async def grant_live_tournament_access(guild: discord.Guild, team_id: int, membe
 async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
     """
     Landet im eigenen Panel-Kanal (nur Bot darf dort schreiben). Zeigt Tabelle +
-    Spielplan-Grafik + einen rein informativen "Team ist da"-Status (blockiert NICHTS
-    mehr - die fruehere Version verhinderte die Spieltag-1-Freigabe, bis alle bestaetigt
-    hatten, das war der Kritikpunkt, nicht das Anzeigen selbst).
+    Spielplan-Grafik + (nur SOLANGE Spieltag 1 noch nicht freigegeben ist) den
+    Aktivitaets-Check "Team ist da" mit Button - rein informativ, blockiert nichts.
+    Sobald Spieltag 1 freigegeben ist, ist der Check durch (die Gruppe spielt jetzt),
+    das Panel zeigt den Abschnitt danach nicht mehr - sonst haengt ein toter Button
+    dauerhaft im Panel rum, den niemand mehr braucht.
     Die Spielplan-Grafik wird per MediaGallery eingebettet (view.schedule_file
     muss vom Aufrufer zusaetzlich in files= mitgegeben werden).
     """
@@ -1170,24 +1158,31 @@ async def build_group_panel(group_id: int) -> discord.ui.LayoutView:
 
     standings_text = await build_group_standings_text(group_id)
 
-    team_rows = await pool.fetch(
-        "SELECT tgt.team_id, tgt.confirmed_ready, te.name FROM tournament_group_teams tgt "
-        "JOIN teams te ON te.id = tgt.team_id WHERE tgt.group_id = $1 ORDER BY te.name",
-        group_id,
-    )
-    confirmed = [r for r in team_rows if r["confirmed_ready"]]
-    ready_lines = [f"### ✅ Team ist da ({len(confirmed)}/{len(team_rows)})"]
-    for r in team_rows:
-        ready_lines.append(f"{'✅' if r['confirmed_ready'] else '🔴'} {r['name']}")
-
-    container = discord.ui.Container(
+    items = [
         discord.ui.TextDisplay(standings_text),
         media,
-        discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
-        discord.ui.TextDisplay("\n".join(ready_lines)),
-        discord.ui.ActionRow(
-            discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
-        ),
+    ]
+
+    if group["released_round"] == 0:
+        team_rows = await pool.fetch(
+            "SELECT tgt.team_id, tgt.confirmed_ready, te.name FROM tournament_group_teams tgt "
+            "JOIN teams te ON te.id = tgt.team_id WHERE tgt.group_id = $1 ORDER BY te.name",
+            group_id,
+        )
+        confirmed = [r for r in team_rows if r["confirmed_ready"]]
+        ready_lines = [f"### ✅ Team ist da ({len(confirmed)}/{len(team_rows)})"]
+        for r in team_rows:
+            ready_lines.append(f"{'✅' if r['confirmed_ready'] else '🔴'} {r['name']}")
+        items += [
+            discord.ui.Separator(spacing=discord.SeparatorSpacing.large),
+            discord.ui.TextDisplay("\n".join(ready_lines)),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="✅ Team ist da", style=discord.ButtonStyle.success, custom_id=f"groupaction:{group_id}:ready"),
+            ),
+        ]
+
+    container = discord.ui.Container(
+        *items,
         accent_color=discord.Color.gold(),
     )
     view.add_item(container)
@@ -1717,6 +1712,10 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
     if channel:
         await channel.send(view=view)
         await pool.execute("UPDATE tournament_groups SET released_round = $1 WHERE id = $2", matchday, group_id)
+        if matchday == 1:
+            # Aktivitaets-Check ("Team ist da") ist mit der ersten Freigabe erledigt -
+            # Panel aktualisieren, damit der Button/Status dort verschwindet.
+            await refresh_group_panel(bot, group_id)
         asyncio.create_task(send_matchday_reminder(channel, matchday))
 
         try:
@@ -2232,6 +2231,13 @@ async def cleanup_tournament_channels(bot: commands.Bot, guild: discord.Guild, t
                     await ch.delete(reason="Turnier beendet")
                 except discord.HTTPException:
                     pass
+        if g["panel_channel_id"]:
+            ch = guild.get_channel(g["panel_channel_id"])
+            if ch:
+                try:
+                    await ch.delete(reason="Turnier beendet")
+                except discord.HTTPException:
+                    pass
         if g["role_id"]:
             role = guild.get_role(g["role_id"])
             if role:
@@ -2244,6 +2250,13 @@ async def cleanup_tournament_channels(bot: commands.Bot, guild: discord.Guild, t
     for b in brackets:
         if b["channel_id"]:
             ch = guild.get_channel(b["channel_id"])
+            if ch:
+                try:
+                    await ch.delete(reason="Turnier beendet")
+                except discord.HTTPException:
+                    pass
+        if b["panel_channel_id"]:
+            ch = guild.get_channel(b["panel_channel_id"])
             if ch:
                 try:
                     await ch.delete(reason="Turnier beendet")
@@ -2286,6 +2299,13 @@ async def reset_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     for b in brackets:
         if b["channel_id"]:
             ch = guild.get_channel(b["channel_id"])
+            if ch:
+                try:
+                    await ch.delete(reason="KO-Phase zurueckgesetzt")
+                except discord.HTTPException:
+                    pass
+        if b["panel_channel_id"]:
+            ch = guild.get_channel(b["panel_channel_id"])
             if ch:
                 try:
                     await ch.delete(reason="KO-Phase zurueckgesetzt")
@@ -2524,22 +2544,20 @@ class TournamentPanel(discord.ui.LayoutView):
             schedule_block = discord.ui.TextDisplay("\n".join(schedule_lines))
 
         # Block: Mannschaftsliste + Warteliste
-        activity_check_phase = t["status"] == "closed" and t.get("phase") == "signup"
-        confirmed_count = sum(1 for tm in registered_teams if tm.get("confirmed_active")) if activity_check_phase else 0
+        # Der Aktivitaets-Check ("Team ist da") gehoert bewusst NUR in die Gruppen-Panels
+        # (nach der Gruppenauslosung), nicht schon hier im Anmelde-Panel - zwei parallele
+        # "Team ist da"-Checks an unterschiedlichen Stellen verwirrten Teams nur.
         paid_team_ids = t.get("_paid_team_ids", set()) if t.get("is_donation_tournament") else set()
 
         team_lines = ["### 📋 Gemeldete Teams"]
-        if activity_check_phase:
-            team_lines.append(f"✅ **Aktivitätscheck:** {confirmed_count}/{registered} Teams bestätigt")
         if t.get("is_donation_tournament"):
             team_lines.append(f"💰 **Bezahlt:** {len(paid_team_ids)}/{registered} Teams")
         team_lines.append("")
         for i in range(1, bracket_size + 1):
             if i <= registered:
                 team = registered_teams[i - 1]
-                mark = " ✅" if activity_check_phase and team.get("confirmed_active") else ""
                 paid_mark = " 💰" if team["id"] in paid_team_ids else ""
-                team_lines.append(f"`{i}.` **{team['name']}** (<@{team['owner_discord_id']}>){mark}{paid_mark}")
+                team_lines.append(f"`{i}.` **{team['name']}** (<@{team['owner_discord_id']}>){paid_mark}")
             else:
                 team_lines.append(f"`{i}.` –")
 
@@ -2571,36 +2589,22 @@ class TournamentPanel(discord.ui.LayoutView):
         items.append(team_block)
         items.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.large))
 
-        if activity_check_phase:
-            items.append(
-                discord.ui.ActionRow(
-                    discord.ui.Button(
-                        label="✅ Team ist da", style=discord.ButtonStyle.success,
-                        custom_id=f"tourney:{t['id']}:confirmactive",
-                    ),
-                    discord.ui.Button(
-                        label="Stream-Link ändern", style=discord.ButtonStyle.secondary,
-                        custom_id=f"tourney:{t['id']}:streamlink",
-                    ),
-                )
+        items.append(
+            discord.ui.ActionRow(
+                discord.ui.Button(
+                    label="Anmelden", style=discord.ButtonStyle.success,
+                    custom_id=f"tourney:{t['id']}:register", disabled=closed,
+                ),
+                discord.ui.Button(
+                    label="Abmelden", style=discord.ButtonStyle.danger,
+                    custom_id=f"tourney:{t['id']}:unregister", disabled=closed,
+                ),
+                discord.ui.Button(
+                    label="Stream-Link ändern", style=discord.ButtonStyle.secondary,
+                    custom_id=f"tourney:{t['id']}:streamlink",
+                ),
             )
-        else:
-            items.append(
-                discord.ui.ActionRow(
-                    discord.ui.Button(
-                        label="Anmelden", style=discord.ButtonStyle.success,
-                        custom_id=f"tourney:{t['id']}:register", disabled=closed,
-                    ),
-                    discord.ui.Button(
-                        label="Abmelden", style=discord.ButtonStyle.danger,
-                        custom_id=f"tourney:{t['id']}:unregister", disabled=closed,
-                    ),
-                    discord.ui.Button(
-                        label="Stream-Link ändern", style=discord.ButtonStyle.secondary,
-                        custom_id=f"tourney:{t['id']}:streamlink",
-                    ),
-                )
-            )
+        )
         items.append(
             discord.ui.ActionRow(
                 discord.ui.Button(
@@ -3293,23 +3297,6 @@ class TournamentCog(commands.Cog):
             await log_action(interaction.guild_id, interaction.user, "signup.withdrawn", "tournament", tournament_id, team["name"])
 
             await interaction.response.send_message(view=success_embed(f"👋 {team['name']} wurde abgemeldet."), ephemeral=True)
-            await refresh_panel(self.bot, tournament_id)
-
-        elif action == "confirmactive":
-            team = await get_team_for_user(interaction.guild_id, interaction.user.id)
-            if not team:
-                await interaction.response.send_message(view=error_embed("Du hast kein Team."), ephemeral=True)
-                return
-            signup = await get_team_signup(tournament_id, team["id"])
-            if not signup or signup["status"] != "registered":
-                await interaction.response.send_message(
-                    view=warning_embed(f"{team['name']} ist nicht als registriert für dieses Turnier eingetragen."), ephemeral=True
-                )
-                return
-            await pool.execute(
-                "UPDATE tournament_signups SET confirmed_active = true WHERE id = $1", signup["id"]
-            )
-            await interaction.response.send_message(view=success_embed(f"{team['name']} ist als aktiv bestätigt!"), ephemeral=True)
             await refresh_panel(self.bot, tournament_id)
 
         elif action == "streamlink":

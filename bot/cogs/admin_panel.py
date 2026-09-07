@@ -828,15 +828,15 @@ class TournamentAdminView(discord.ui.View):
                     user = await interaction.client.fetch_user(m["discord_id"])
                     dm_embed = warning_embed(
                         f"Anmeldung für {t['name']} geschlossen!",
-                        f"Bitte bestätigt jetzt mit **{team['name']}** im Turnier-Panel, dass ihr aktiv seid "
-                        "(Button 'Team ist da'), sonst kann die Gruppenphase nicht starten.",
+                        f"**{team['name']}** ist jetzt fest angemeldet. Sobald die Gruppen ausgelost sind, "
+                        "meldet euch dort im Gruppen-Panel über den Button 'Team ist da' als bereit.",
                     )
                     await user.send(embed=dm_embed)
                 except discord.HTTPException:
                     pass
 
         await interaction.followup.send(
-            view=success_embed("Anmeldung geschlossen", "Teams wurden per DM zum Aktivitätscheck aufgefordert."),
+            view=success_embed("Anmeldung geschlossen", "Teams wurden per DM informiert."),
             ephemeral=True,
         )
 
