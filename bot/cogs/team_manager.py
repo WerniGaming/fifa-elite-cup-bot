@@ -564,26 +564,24 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             )
             return
 
+        # EA-Suche ist nur noch "best effort": EA ist gerade auf FC27 umgestiegen, ein Club
+        # taucht in der API erst auf, sobald er dort mindestens ein Match gespielt hat - bis
+        # dahin liefert die Suche (oder die ganze API) nichts oder einen Fehler. Das darf die
+        # Team-Erstellung NICHT mehr blockieren - der eingegebene Name wird notfalls direkt
+        # uebernommen, die EA-Verknuepfung laesst sich spaeter jederzeit nachtragen (sobald
+        # der Club in FC27 aktiv ist), sobald wieder erreichbar.
+        ea_club_id = ""
+        ea_club_name = self.ea_club_name.value
         try:
             async with EAProClubsAPI() as api:
                 results = await api.search_club(self.ea_club_name.value, PLATFORM_DEFAULT)
-        except Exception as e:
-            await interaction.followup.send(view=error_embed("EA-API-Fehler", f"`{e}` - bitte später erneut versuchen."), ephemeral=True)
-            return
-
-        if not results:
-            await interaction.followup.send(
-                f"Kein EA-Club namens **{self.ea_club_name.value}** gefunden (Plattform PS5/XSX/PC). "
-                "Prüfe die Schreibweise oder sag Bescheid, falls dein Club auf PS4/Xbox One/Switch spielt "
-                "(wird aktuell noch nicht automatisch geprüft).",
-                ephemeral=True,
-            )
-            return
-
-        club = results[0]
-        info = club.get("clubInfo", {})
-        ea_club_id = str(info.get("clubId") or club.get("clubId") or "")
-        ea_club_name = info.get("name") or club.get("clubName") or self.ea_club_name.value
+            if results:
+                club = results[0]
+                info = club.get("clubInfo", {})
+                ea_club_id = str(info.get("clubId") or club.get("clubId") or "")
+                ea_club_name = info.get("name") or club.get("clubName") or self.ea_club_name.value
+        except Exception:
+            pass
 
         try:
             row = await pool.fetchrow(
@@ -711,26 +709,32 @@ class EAClubModal(discord.ui.Modal, title="EA Club verknüpfen"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
+        # Best effort, wie bei der Team-Erstellung: EA laesst gerade wegen des FC27-Umstiegs
+        # viele Clubs nicht finden - blockiert das Verknuepfen nicht mehr, uebernimmt notfalls
+        # einfach den eingegebenen Namen (EA-Club-ID bleibt leer, laesst sich spaeter erneut
+        # versuchen, sobald der Club in FC27 aktiv ist).
+        ea_club_id = ""
+        ea_club_name = self.ea_club_name.value
+        note = ""
         try:
             async with EAProClubsAPI() as api:
                 results = await api.search_club(self.ea_club_name.value, PLATFORM_DEFAULT)
-        except Exception as e:
-            await interaction.followup.send(view=error_embed("EA-API-Fehler", f"`{e}`"), ephemeral=True)
-            return
-        if not results:
-            await interaction.followup.send(view=error_embed("Kein Club mit diesem Namen gefunden."), ephemeral=True)
-            return
-        club = results[0]
-        info = club.get("clubInfo", {})
-        ea_club_id = str(info.get("clubId") or club.get("clubId") or "")
-        ea_club_name = info.get("name") or club.get("clubName") or self.ea_club_name.value
+            if results:
+                club = results[0]
+                info = club.get("clubInfo", {})
+                ea_club_id = str(info.get("clubId") or club.get("clubId") or "")
+                ea_club_name = info.get("name") or club.get("clubName") or self.ea_club_name.value
+            else:
+                note = " ⚠️ EA hat den Club nicht gefunden (FC27-Umstieg) - Name wurde trotzdem übernommen, EA-Verknüpfung bitte später erneut versuchen."
+        except Exception:
+            note = " ⚠️ EA-API gerade nicht erreichbar - Name wurde trotzdem übernommen, EA-Verknüpfung bitte später erneut versuchen."
 
         pool = get_pool()
         await pool.execute(
             "UPDATE teams SET ea_club_id = $1, ea_club_name = $2 WHERE id = $3",
             ea_club_id, ea_club_name, self.team_id,
         )
-        await interaction.followup.send(view=success_embed(f"Verknüpft mit {ea_club_name}"), ephemeral=True)
+        await interaction.followup.send(view=success_embed(f"Verknüpft mit {ea_club_name}{note}"), ephemeral=True)
 
 
 class LogoUploadModal(discord.ui.Modal, title="Logo hochladen"):
