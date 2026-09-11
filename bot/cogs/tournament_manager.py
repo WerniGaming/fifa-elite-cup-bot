@@ -1214,8 +1214,7 @@ async def build_group_standings_text(group_id: int) -> str:
     pool = get_pool()
     team_rows = await pool.fetch("SELECT team_id FROM tournament_group_teams WHERE group_id = $1", group_id)
     standings = [await _team_group_record(pool, group_id, tr["team_id"]) for tr in team_rows]
-    # Sortierung: 1. Punkte, 2. Torverhaeltnis (Tiebreaker), 3. geschossene Tore
-    standings.sort(key=lambda x: (x["points"], x["goal_diff"], x["goals_for"]), reverse=True)
+    standings = await _sort_group_standings(pool, group_id, standings)
 
     names = await team_name_map([s["team_id"] for s in standings])
     lines = ["**Tabelle**", ""]
@@ -2072,6 +2071,44 @@ async def release_first_matchday(bot: commands.Bot, guild: discord.Guild, tourna
     await refresh_live_schedule(bot, guild, tournament_id)
 
 
+async def _sort_group_standings(pool, group_id: int, standings: list[dict]) -> list[dict]:
+    """Sortiert eine Gruppentabelle: 1. Punkte, 2. Torverhaeltnis, 3. geschossene Tore, 4. direkter
+    Vergleich (Ergebnis des Spiels zwischen genau den beiden Teams, falls sie sich begegnet sind),
+    5. Team-ID als letzter, rein deterministischer Fallback (nur um ueberhaupt eine reproduzierbare
+    Reihenfolge zu haben, kein echtes Fairness-Kriterium). Vorher endete die Sortierung bei
+    Tordifferenz/Toren - bei komplettem Gleichstand haette dann die zufaellige DB-Ruckgabe-
+    Reihenfolge entschieden, WER von zwei gleich guten Drittplatzierten in die KO-Phase kommt."""
+    import functools
+
+    h2h_rows = await pool.fetch(
+        """
+        SELECT team1_id, team2_id, winner_id FROM tournament_matches
+        WHERE group_id = $1 AND status = 'completed' AND team1_id IS NOT NULL AND team2_id IS NOT NULL
+        """,
+        group_id,
+    )
+    h2h = {}
+    for m in h2h_rows:
+        h2h[(m["team1_id"], m["team2_id"])] = m["winner_id"]
+        h2h[(m["team2_id"], m["team1_id"])] = m["winner_id"]
+
+    def compare(a: dict, b: dict) -> int:
+        for key in ("points", "goal_diff", "goals_for"):
+            if a[key] != b[key]:
+                return -1 if a[key] > b[key] else 1
+        pair = (a["team_id"], b["team_id"])
+        if pair in h2h:
+            winner = h2h[pair]
+            if winner == a["team_id"]:
+                return -1
+            if winner == b["team_id"]:
+                return 1
+        return -1 if a["team_id"] < b["team_id"] else 1
+
+    standings.sort(key=functools.cmp_to_key(compare))
+    return standings
+
+
 async def get_group_standings(tournament_id: int) -> list[dict]:
     """Gibt pro Gruppe eine Liste mit Team-Namen, Siegen und Torverhaeltnis zurueck, sortiert."""
     pool = get_pool()
@@ -2084,8 +2121,7 @@ async def get_group_standings(tournament_id: int) -> list[dict]:
             "SELECT team_id FROM tournament_group_teams WHERE group_id = $1", g["id"]
         )
         standings = [await _team_group_record(pool, g["id"], tr["team_id"]) for tr in team_rows]
-        # Sortierung: 1. Punkte (3/1/0 wie im echten Fussball), 2. Torverhaeltnis, 3. geschossene Tore
-        standings.sort(key=lambda x: (x["points"], x["goal_diff"], x["goals_for"]), reverse=True)
+        standings = await _sort_group_standings(pool, g["id"], standings)
         result.append({"group_number": g["group_number"], "group_id": g["id"], "standings": standings})
     return result
 
@@ -2543,7 +2579,10 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
             all_seeds.append({**s, "tier": tier})
 
     def _seed_key(s):
-        return (s["tier"], -s["points"], -s["goal_diff"], -s["goals_for"])
+        # Teams aus VERSCHIEDENEN Gruppen koennen sich nicht direkt begegnet sein - direkter
+        # Vergleich faellt hier also flach, team_id ist als letzter Fallback wenigstens
+        # deterministisch (reproduzierbar) statt von der zufaelligen DB-Reihenfolge abzuhaengen.
+        return (s["tier"], -s["points"], -s["goal_diff"], -s["goals_for"], s["team_id"])
 
     all_seeds.sort(key=_seed_key)
 
