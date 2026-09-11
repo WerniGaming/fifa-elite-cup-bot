@@ -1568,17 +1568,26 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
                     f"Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
                 )
 
+            # Nur noch eine Kurzfassung der offenen Spiele (naechster Spieltag), nicht mehr
+            # ALLE offenen Spiele einzeln auflisten - bei 6er-Gruppen (15 Spiele statt 6 pro
+            # Gruppe) sprengte das bei mehreren Gruppen zusammen erneut Discords 4000-Zeichen-
+            # Limit fuer Components V2 und liess das Posten des kompletten Live-Spielplans
+            # (und damit auch alle nachfolgenden Ergebnis-Verarbeitungen) crashen. Die volle
+            # Liste steht ohnehin schon im jeweiligen Gruppenkanal/-Panel.
             open_matches = [m for m in matches if m["status"] != "completed"]
             if open_matches:
+                next_round = min(m["round"] for m in open_matches)
+                open_next_round = [m for m in open_matches if m["round"] == next_round]
                 m_names = await team_name_map(
-                    [m["team1_id"] for m in open_matches] + [m["team2_id"] for m in open_matches]
+                    [m["team1_id"] for m in open_next_round] + [m["team2_id"] for m in open_next_round]
                 )
                 block.append("")
-                block.append("**Offene Spiele:**")
-                for m in open_matches:
-                    block.append(
-                        f"🔴 `ST {m['round']}` {m_names.get(m['team1_id'], '?')} 🆚 {m_names.get(m['team2_id'], '?')}"
-                    )
+                block.append(f"**Nächster Spieltag ({next_round}):**")
+                for m in open_next_round:
+                    block.append(f"🔴 {m_names.get(m['team1_id'], '?')} 🆚 {m_names.get(m['team2_id'], '?')}")
+                remaining = len(open_matches) - len(open_next_round)
+                if remaining > 0:
+                    block.append(f"-# + {remaining} weitere offene Spiele in dieser Gruppe")
 
             # Bewusst KEINE volle "Ergebnisse:"-Liste mehr hier - die wuchs unbegrenzt mit dem
             # Turnierfortschritt (bei vielen Gruppen/Spielen ueberschritt der gesamte Nachrichtentext
