@@ -1821,8 +1821,22 @@ async def release_ko_round(bot: commands.Bot, channel: discord.abc.Messageable, 
 
 
 async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: int, matchday: int):
-    """Gibt einen Spieltag frei: postet Paarungen im Gruppenkanal, DMt alle Manager, startet 5-Min-Reminder."""
+    """Gibt einen Spieltag frei: postet Paarungen im Gruppenkanal, DMt alle Manager, startet 5-Min-Reminder.
+
+    Race-sicher: der Freigabe-"Anspruch" (released_round hochsetzen) passiert atomar GANZ AM
+    ANFANG, nicht erst nach dem Posten. Live beobachtet: wenn mehrere Ergebnisse eines
+    Spieltags fast gleichzeitig bestaetigt werden (z.B. mehrere EA-Auto-Erkennungen kurz
+    hintereinander), rief check_and_release_next_matchday() mehrfach parallel auf, bevor
+    einer der Aufrufe released_round tatsaechlich aktualisiert hatte - die "schon freigegeben"-
+    Pruefung kam dadurch mehrfach zu spaet, die Freigabe-Nachricht wurde 2-5x gepostet."""
     pool = get_pool()
+    claimed = await pool.fetchval(
+        "UPDATE tournament_groups SET released_round = $2 WHERE id = $1 AND released_round < $2 RETURNING id",
+        group_id, matchday,
+    )
+    if claimed is None:
+        return  # Schon freigegeben oder ein anderer, fast gleichzeitiger Aufruf macht es bereits
+
     group = await pool.fetchrow("SELECT * FROM tournament_groups WHERE id = $1", group_id)
     if not group:
         return
@@ -1901,7 +1915,6 @@ async def release_matchday(bot: commands.Bot, guild: discord.Guild, group_id: in
 
     if channel:
         await channel.send(view=view)
-        await pool.execute("UPDATE tournament_groups SET released_round = $1 WHERE id = $2", matchday, group_id)
         if matchday == 1:
             # Aktivitaets-Check ("Team ist da") ist mit der ersten Freigabe erledigt -
             # Panel aktualisieren, damit der Button/Status dort verschwindet.
