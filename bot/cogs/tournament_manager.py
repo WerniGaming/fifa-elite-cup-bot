@@ -51,20 +51,47 @@ from ea_api import EAProClubsAPI
 
 log = logging.getLogger("fifa-elite-cup")
 
-ALLOWED_BRACKET_SIZES = [8, 16, 32, 64, 128]
-# NUR glatte 2er-Potenzen erlaubt (nicht mehr jede durch 4 teilbare Zahl). Grund: bei 4er-
-# Gruppen gehen pro Gruppe immer Top 2 ins Winner-, Platz 3+4 ins Loser-Bracket - jedes
-# Bracket bekommt damit IMMER genau die Haelfte aller Teams. Ist die Team-Gesamtzahl selbst
-# keine 2er-Potenz (z.B. 20, 24, 28 Teams -> 10/14 pro Bracket), ist auch die Bracket-Groesse
-# keine 2er-Potenz - create_bracket() muss dann eine Qualifikationsrunde einschieben, damit
-# die Runde vor dem Finale bei einer sauberen 2er-Potenz landet. Bei ausschliesslich 2er-
-# Potenzen als Turniergroesse (8/16/32/64/128) ist die Bracket-Groesse IMMER ebenfalls eine
-# 2er-Potenz - es kann nie wieder eine Qualifikationsrunde noetig werden.
+ALLOWED_BRACKET_SIZES = [8, 12, 16, 20, 24, 32, 36, 40, 48, 64, 68, 72, 80, 96, 128]
+# Jede dieser Zahlen laesst sich als Summe zweier 2er-Potenzen (je >= 4) schreiben, z.B.
+# 24 = 16 + 8, 40 = 32 + 8. Winner- und Loser-Bracket muessen NICHT mehr gleich gross sein
+# (siehe _split_bracket_sizes) - dadurch reicht es, wenn JEDES Bracket fuer sich eine
+# 2er-Potenz ist, nicht mehr die Team-Gesamtzahl selbst. Das ergibt deutlich mehr moegliche
+# Turnierstufen als nur 8/16/32/64/128, ohne dass jemals eine Qualifikationsrunde noetig wird.
 
 
 def group_size_for(bracket_size: int) -> int:
     """Es gibt nur noch Vierergruppen."""
     return 4
+
+
+def _split_bracket_sizes(total: int) -> tuple[int, int]:
+    """Teilt `total` qualifizierte Teams auf Winner-/Loser-Bracket auf, so dass BEIDE
+    Teilgroessen eine 2er-Potenz sind - moeglichst ausgewogen, bei Gleichstand gewinnt die
+    groessere Aufteilung fuers Winner-Bracket (naeher am alten 50/50-Verhalten bei reinen
+    2er-Potenz-Gesamtzahlen, wo das exakt 50/50 bleibt). Existiert ausnahmsweise keine exakte
+    Zerlegung (z.B. weil waehrend des Turniers Teams ausgetreten sind und die Teamzahl dadurch
+    von der geplanten Turnierstufe abweicht), faellt es auf die groesstmoegliche 2er-Potenz
+    fuers Winner-Bracket zurueck - das Loser-Bracket kann dann ausnahmsweise doch eine
+    Qualifikationsrunde brauchen (macht create_bracket() automatisch)."""
+    def is_pow2(n: int) -> bool:
+        return n > 0 and (n & (n - 1)) == 0
+
+    best = None
+    w = 1
+    while w < total:
+        l = total - w
+        if is_pow2(l):
+            balance = abs(w - l)
+            if best is None or balance < best[0] or (balance == best[0] and w > best[1]):
+                best = (balance, w, l)
+        w *= 2
+    if best:
+        return best[1], best[2]
+
+    w = 1
+    while w * 2 <= total:
+        w *= 2
+    return w, total - w
 
 
 # ---------- Hilfsfunktionen ----------
@@ -2489,31 +2516,27 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
 
     standings = await get_group_standings(tournament_id)
 
-    winner_seeds: list[dict] = []
-    loser_seeds: list[dict] = []
+    # Alle qualifizierten Teams gruppenuebergreifend in EINE Rangliste: tier = Platzierung
+    # INNERHALB der eigenen Gruppe (0=Erster, 1=Zweiter, ...), bei Gleichstand Siege/
+    # Tordifferenz/Tore. Alle Gruppenersten stehen so vor allen Gruppenzweiten usw. - der
+    # eigene Gruppensieg garantiert IMMER einen Platz weit vorne. Winner-/Loser-Bracket
+    # werden NICHT mehr strikt 50/50 pro Gruppe aufgeteilt (frueher: fixe Top-Haelfte pro
+    # Gruppe), sondern anhand dieser Gesamtrangliste in zwei 2er-Potenz-grosse Bloecke
+    # geschnitten (siehe _split_bracket_sizes) - dadurch sind viel mehr Turniergroessen
+    # moeglich, ohne dass je eine Qualifikationsrunde noetig wird.
+    all_seeds: list[dict] = []
     for g in standings:
         eligible = [s for s in g["standings"] if s["team_id"] not in withdrawn_team_ids]
-        # Aufrunden statt abrunden: bei einer durch Freilos entstandenen 3er-Gruppe (Sollgroesse
-        # eigentlich 4) gehen so trotzdem 2 Teams weiter statt nur 1 (3 // 2 = 1 wuerde die
-        # Gruppenzweiten dort schlechter stellen als Gruppendritte in vollen 4er-Gruppen). Bei
-        # sauberen 4er/6er-Gruppen aendert sich dadurch nichts (4+1)//2=2, (6+1)//2=3.
-        winner_n = (len(g["standings"]) + 1) // 2
-        for tier, s in enumerate(eligible[:winner_n]):
-            winner_seeds.append({**s, "tier": tier})
-        for tier, s in enumerate(eligible[winner_n:]):
-            loser_seeds.append({**s, "tier": tier})
+        for tier, s in enumerate(eligible):
+            all_seeds.append({**s, "tier": tier})
 
-    # Seeding gruppenuebergreifend: erst Gruppenplatz (alle Gruppensieger vor allen
-    # Gruppenzweiten usw.), bei gleichem Platz dann Siege/Tordifferenz/Tore. Sonst
-    # koennte ein Gruppenzweiter vor einem Gruppenersten mit klar besserer Bilanz
-    # direkt in die KO-Hauptrunde rutschen, waehrend der Erste in die Quali muss.
     def _seed_key(s):
         return (s["tier"], -s["wins"], -s["goal_diff"], -s["goals_for"])
 
-    winner_seeds.sort(key=_seed_key)
-    loser_seeds.sort(key=_seed_key)
-    winner_teams = [s["team_id"] for s in winner_seeds]
-    loser_teams = [s["team_id"] for s in loser_seeds]
+    all_seeds.sort(key=_seed_key)
+    winner_size, loser_size = _split_bracket_sizes(len(all_seeds))
+    winner_teams = [s["team_id"] for s in all_seeds[:winner_size]]
+    loser_teams = [s["team_id"] for s in all_seeds[winner_size:]]
 
     category_overwrites = await apply_staff_overwrites(guild, {})
     category = await guild.create_category(f"{t['name']} KO-Phase"[:100], overwrites=category_overwrites)
