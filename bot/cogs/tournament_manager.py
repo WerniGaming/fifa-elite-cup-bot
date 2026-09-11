@@ -2551,10 +2551,13 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
 
     if t.get("single_bracket_mode"):
         # Nur ein einziges KO-Bracket (kein Loser-Bracket) - die Top-N (groesste 2er-Potenz
-        # <= Gesamtzahl) ziehen in eine normale Einzel-KO-Phase ein, der Rest ist nach der
-        # Gruppenphase fertig (Endplatzierung anhand der Gruppentabelle).
+        # <= HALBE Gesamtzahl, analog zur "oberen Haelfte" beim normalen Winner-Bracket-Split)
+        # ziehen in eine normale Einzel-KO-Phase ein, der Rest ist nach der Gruppenphase fertig
+        # (Endplatzierung anhand der Gruppentabelle). Wichtig: <= total//2, NICHT <= total -
+        # sonst wuerden bei z.B. 36 Teams satte 32 davon durchgewunken statt nur die besten
+        # Haelfte gefiltert (Gruppenphase haette dann kaum noch eine Aussiebe-Wirkung).
         winner_size = 1
-        while winner_size * 2 <= len(all_seeds):
+        while winner_size * 2 <= len(all_seeds) // 2:
             winner_size *= 2
         loser_size = 0
     else:
