@@ -59,10 +59,15 @@ ALLOWED_BRACKET_SIZES = [8, 12, 16, 20, 24, 32, 36, 40, 48, 64, 68, 72, 80, 96, 
 # Turnierstufen als nur 8/16/32/64/128, ohne dass jemals eine Qualifikationsrunde noetig wird.
 
 
-def group_size_for(bracket_size: int, override: int | None = None) -> int:
-    """Standardmaessig nur noch Vierergruppen - `override` erlaubt pro Turnier eine andere
-    feste Gruppengroesse (z.B. 6er-Gruppen), siehe tournaments.group_size_override."""
-    return override or 4
+def group_size_for(bracket_size: int, preferred: int | None = None) -> int:
+    """Standardmaessig Vierergruppen. `preferred` (z.B. 6, siehe tournaments.group_size_override)
+    wird nur genutzt, wenn die aktuelle Turnierstufe glatt dadurch teilbar ist - sonst faellt
+    es automatisch auf 4er-Gruppen zurueck. So bleiben ALLE Turnierstufen nutzbar (kleine
+    Sprünge), statt nur die durch 6 teilbaren - vorher fuehrte ein erzwungenes "nur 6er" zu
+    riesigen Luecken zwischen den Stufen und einer ellenlangen Warteliste."""
+    if preferred and bracket_size % preferred == 0:
+        return preferred
+    return 4
 
 
 def _split_bracket_sizes(total: int) -> tuple[int, int]:
@@ -106,10 +111,11 @@ def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int, gro
     sofort hochzuschalten - die naechste Stufe wird erst 'aktiv', wenn sie
     wirklich voll waere.
     """
-    candidates = sorted(
-        s for s in ALLOWED_BRACKET_SIZES
-        if min_teams <= s <= max_teams and (not group_size_override or s % group_size_override == 0)
-    )
+    # group_size_override wird hier NICHT mehr zum Filtern der Stufen verwendet - jede Stufe
+    # in ALLOWED_BRACKET_SIZES ist durch 4 teilbar und damit immer nutzbar. group_size_for()
+    # entscheidet pro Stufe selbst, ob die bevorzugte Gruppengroesse (z.B. 6er) passt oder
+    # automatisch auf 4er zurueckgefallen wird.
+    candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
     if not candidates:
         return max_teams
     active = candidates[0]
@@ -125,10 +131,11 @@ def bracket_size_progression_text(min_teams: int, max_teams: int, total_signups:
     """Zeigt konkret, ab wie vielen Anmeldungen das Turnier auf welche Groesse waechst -
     damit Teams verstehen, warum ihre Anmeldung das Turnier ggf. noch vergroessert, statt
     nur den vagen Hinweis 'die Groesse waechst automatisch' zu lesen."""
-    candidates = sorted(
-        s for s in ALLOWED_BRACKET_SIZES
-        if min_teams <= s <= max_teams and (not group_size_override or s % group_size_override == 0)
-    )
+    # group_size_override wird hier NICHT mehr zum Filtern der Stufen verwendet - jede Stufe
+    # in ALLOWED_BRACKET_SIZES ist durch 4 teilbar und damit immer nutzbar. group_size_for()
+    # entscheidet pro Stufe selbst, ob die bevorzugte Gruppengroesse (z.B. 6er) passt oder
+    # automatisch auf 4er zurueckgefallen wird.
+    candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
     if not candidates:
         return ""
     active = compute_bracket_size(total_signups, min_teams, max_teams, group_size_override)
