@@ -1179,39 +1179,50 @@ def build_bracket_actions_view(tournament_id: int, bracket: str) -> discord.ui.L
     return view
 
 
+async def _team_group_record(pool, group_id: int, team_id: int) -> dict:
+    """Sieg/Unentschieden/Niederlage + Tore eines Teams in einer Gruppe, mit normaler
+    Fussball-Punktewertung (3 Punkte Sieg, 1 Punkt Unentschieden, 0 Punkte Niederlage) -
+    vorher zaehlte hier NUR winner_id = team_id ("Siege"), Unentschieden gingen komplett
+    unter, es gab ueberhaupt keine Punktewertung."""
+    row = await pool.fetchrow(
+        """
+        SELECT
+          COUNT(*) AS played,
+          COUNT(*) FILTER (WHERE winner_id = $2) AS wins,
+          COUNT(*) FILTER (
+            WHERE winner_id IS NULL AND team1_id IS NOT NULL AND team2_id IS NOT NULL
+          ) AS draws,
+          COALESCE(SUM(CASE WHEN team1_id = $2 THEN team1_score WHEN team2_id = $2 THEN team2_score ELSE 0 END), 0) AS goals_for,
+          COALESCE(SUM(CASE WHEN team1_id = $2 THEN team2_score WHEN team2_id = $2 THEN team1_score ELSE 0 END), 0) AS goals_against
+        FROM tournament_matches
+        WHERE group_id = $1 AND status = 'completed' AND (team1_id = $2 OR team2_id = $2)
+        """,
+        group_id, team_id,
+    )
+    wins, draws = row["wins"], row["draws"]
+    losses = row["played"] - wins - draws
+    goals_for, goals_against = row["goals_for"] or 0, row["goals_against"] or 0
+    return {
+        "team_id": team_id, "wins": wins, "draws": draws, "losses": losses,
+        "points": wins * 3 + draws,
+        "goals_for": goals_for, "goals_against": goals_against,
+        "goal_diff": goals_for - goals_against,
+    }
+
+
 async def build_group_standings_text(group_id: int) -> str:
     pool = get_pool()
     team_rows = await pool.fetch("SELECT team_id FROM tournament_group_teams WHERE group_id = $1", group_id)
-    standings = []
-    for tr in team_rows:
-        wins = await pool.fetchval(
-            "SELECT COUNT(*) FROM tournament_matches WHERE group_id = $1 AND winner_id = $2",
-            group_id, tr["team_id"],
-        )
-        goals_row = await pool.fetchrow(
-            """
-            SELECT
-              COALESCE(SUM(CASE WHEN team1_id = $2 THEN team1_score WHEN team2_id = $2 THEN team2_score ELSE 0 END), 0) AS goals_for,
-              COALESCE(SUM(CASE WHEN team1_id = $2 THEN team2_score WHEN team2_id = $2 THEN team1_score ELSE 0 END), 0) AS goals_against
-            FROM tournament_matches
-            WHERE group_id = $1 AND status = 'completed' AND (team1_id = $2 OR team2_id = $2)
-            """,
-            group_id, tr["team_id"],
-        )
-        goals_for = goals_row["goals_for"] or 0
-        goals_against = goals_row["goals_against"] or 0
-        standings.append({
-            "team_id": tr["team_id"], "wins": wins,
-            "goals_for": goals_for, "goals_against": goals_against,
-            "goal_diff": goals_for - goals_against,
-        })
-    standings.sort(key=lambda x: (x["wins"], x["goal_diff"], x["goals_for"]), reverse=True)
+    standings = [await _team_group_record(pool, group_id, tr["team_id"]) for tr in team_rows]
+    # Sortierung: 1. Punkte, 2. Torverhaeltnis (Tiebreaker), 3. geschossene Tore
+    standings.sort(key=lambda x: (x["points"], x["goal_diff"], x["goals_for"]), reverse=True)
 
     names = await team_name_map([s["team_id"] for s in standings])
     lines = ["**Tabelle**", ""]
     for i, s in enumerate(standings, start=1):
         lines.append(
-            f"`{i}.` {names.get(s['team_id'], '?')} — `{s['wins']}` Siege · Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
+            f"`{i}.` {names.get(s['team_id'], '?')} — `{s['points']}` Punkte ({s['wins']}S/{s['draws']}U) · "
+            f"Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
         )
     return "\n".join(lines)
 
@@ -1564,7 +1575,7 @@ async def build_live_schedule_view(tournament_id: int) -> discord.ui.LayoutView:
             for i, s in enumerate(g["standings"]):
                 prefix = medals[i] if i < 3 else f"`{i + 1}.`"
                 block.append(
-                    f"{prefix} **{names.get(s['team_id'], '?')}** — `{s['wins']}` Siege · "
+                    f"{prefix} **{names.get(s['team_id'], '?')}** — `{s['points']}` Punkte ({s['wins']}S/{s['draws']}U) · "
                     f"Tore `{s['goals_for']}:{s['goals_against']}` (`{s['goal_diff']:+d}`)"
                 )
 
@@ -2072,31 +2083,9 @@ async def get_group_standings(tournament_id: int) -> list[dict]:
         team_rows = await pool.fetch(
             "SELECT team_id FROM tournament_group_teams WHERE group_id = $1", g["id"]
         )
-        standings = []
-        for tr in team_rows:
-            wins = await pool.fetchval(
-                "SELECT COUNT(*) FROM tournament_matches WHERE group_id = $1 AND winner_id = $2",
-                g["id"], tr["team_id"],
-            )
-            goals_row = await pool.fetchrow(
-                """
-                SELECT
-                  COALESCE(SUM(CASE WHEN team1_id = $2 THEN team1_score WHEN team2_id = $2 THEN team2_score ELSE 0 END), 0) AS goals_for,
-                  COALESCE(SUM(CASE WHEN team1_id = $2 THEN team2_score WHEN team2_id = $2 THEN team1_score ELSE 0 END), 0) AS goals_against
-                FROM tournament_matches
-                WHERE group_id = $1 AND status = 'completed' AND (team1_id = $2 OR team2_id = $2)
-                """,
-                g["id"], tr["team_id"],
-            )
-            goals_for = goals_row["goals_for"] or 0
-            goals_against = goals_row["goals_against"] or 0
-            standings.append({
-                "team_id": tr["team_id"], "wins": wins,
-                "goals_for": goals_for, "goals_against": goals_against,
-                "goal_diff": goals_for - goals_against,
-            })
-        # Sortierung: 1. Siege, 2. Torverhaeltnis (Tiebreaker), 3. geschossene Tore
-        standings.sort(key=lambda x: (x["wins"], x["goal_diff"], x["goals_for"]), reverse=True)
+        standings = [await _team_group_record(pool, g["id"], tr["team_id"]) for tr in team_rows]
+        # Sortierung: 1. Punkte (3/1/0 wie im echten Fussball), 2. Torverhaeltnis, 3. geschossene Tore
+        standings.sort(key=lambda x: (x["points"], x["goal_diff"], x["goals_for"]), reverse=True)
         result.append({"group_number": g["group_number"], "group_id": g["id"], "standings": standings})
     return result
 
@@ -2554,7 +2543,7 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
             all_seeds.append({**s, "tier": tier})
 
     def _seed_key(s):
-        return (s["tier"], -s["wins"], -s["goal_diff"], -s["goals_for"])
+        return (s["tier"], -s["points"], -s["goal_diff"], -s["goals_for"])
 
     all_seeds.sort(key=_seed_key)
 
