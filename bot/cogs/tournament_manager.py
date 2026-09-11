@@ -2534,9 +2534,19 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
         return (s["tier"], -s["wins"], -s["goal_diff"], -s["goals_for"])
 
     all_seeds.sort(key=_seed_key)
-    winner_size, loser_size = _split_bracket_sizes(len(all_seeds))
+
+    if t.get("single_bracket_mode"):
+        # Nur ein einziges KO-Bracket (kein Loser-Bracket) - die Top-N (groesste 2er-Potenz
+        # <= Gesamtzahl) ziehen in eine normale Einzel-KO-Phase ein, der Rest ist nach der
+        # Gruppenphase fertig (Endplatzierung anhand der Gruppentabelle).
+        winner_size = 1
+        while winner_size * 2 <= len(all_seeds):
+            winner_size *= 2
+        loser_size = 0
+    else:
+        winner_size, loser_size = _split_bracket_sizes(len(all_seeds))
     winner_teams = [s["team_id"] for s in all_seeds[:winner_size]]
-    loser_teams = [s["team_id"] for s in all_seeds[winner_size:]]
+    loser_teams = [s["team_id"] for s in all_seeds[winner_size:winner_size + loser_size]]
 
     category_overwrites = await apply_staff_overwrites(guild, {})
     category = await guild.create_category(f"{t['name']} KO-Phase"[:100], overwrites=category_overwrites)
@@ -2547,7 +2557,8 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     await pool.execute("UPDATE tournaments SET bracket_category_id = $1 WHERE id = $2", category.id, tournament_id)
 
     await create_bracket(bot, guild, tournament_id, t, "winner", winner_teams, category)
-    await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams, category)
+    if loser_teams:
+        await create_bracket(bot, guild, tournament_id, t, "loser", loser_teams, category)
 
 
 async def team_name_map(team_ids: list[int]) -> dict[int, str]:
