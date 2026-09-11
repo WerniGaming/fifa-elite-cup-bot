@@ -51,10 +51,15 @@ from ea_api import EAProClubsAPI
 
 log = logging.getLogger("fifa-elite-cup")
 
-ALLOWED_BRACKET_SIZES = sorted(set(
-    [n for n in range(8, 129, 4)]     # nur noch durch 4er-Gruppen sauber teilbar: 8,12,16,20,24,28,32...
-                                       # (6er-Gruppen bewusst abgeschafft - nur noch Vierergruppen)
-))
+ALLOWED_BRACKET_SIZES = [8, 16, 32, 64, 128]
+# NUR glatte 2er-Potenzen erlaubt (nicht mehr jede durch 4 teilbare Zahl). Grund: bei 4er-
+# Gruppen gehen pro Gruppe immer Top 2 ins Winner-, Platz 3+4 ins Loser-Bracket - jedes
+# Bracket bekommt damit IMMER genau die Haelfte aller Teams. Ist die Team-Gesamtzahl selbst
+# keine 2er-Potenz (z.B. 20, 24, 28 Teams -> 10/14 pro Bracket), ist auch die Bracket-Groesse
+# keine 2er-Potenz - create_bracket() muss dann eine Qualifikationsrunde einschieben, damit
+# die Runde vor dem Finale bei einer sauberen 2er-Potenz landet. Bei ausschliesslich 2er-
+# Potenzen als Turniergroesse (8/16/32/64/128) ist die Bracket-Groesse IMMER ebenfalls eine
+# 2er-Potenz - es kann nie wieder eine Qualifikationsrunde noetig werden.
 
 
 def group_size_for(bracket_size: int) -> int:
