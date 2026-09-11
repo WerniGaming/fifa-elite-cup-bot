@@ -564,24 +564,14 @@ class CreateTeamModal(discord.ui.Modal, title="Team verknuepfen"):
             )
             return
 
-        # EA-Suche ist nur noch "best effort": EA ist gerade auf FC27 umgestiegen, ein Club
-        # taucht in der API erst auf, sobald er dort mindestens ein Match gespielt hat - bis
-        # dahin liefert die Suche (oder die ganze API) nichts oder einen Fehler. Das darf die
-        # Team-Erstellung NICHT mehr blockieren - der eingegebene Name wird notfalls direkt
-        # uebernommen, die EA-Verknuepfung laesst sich spaeter jederzeit nachtragen (sobald
-        # der Club in FC27 aktiv ist), sobald wieder erreichbar.
+        # EA-Suche bei der Team-Erstellung komplett deaktiviert (nicht nur "best effort"):
+        # EA ist auf FC27 umgestiegen, fast jede Suche liefert aktuell nichts und laesst die
+        # Anfrage erst in den vollen 25s-API-Timeout laufen ("Bot denkt ewig nach"), bevor der
+        # Fallback greift. Der eingegebene Name wird direkt uebernommen - die EA-Verknuepfung
+        # kann jederzeit ueber 'Team bearbeiten' -> 'EA Club verknuepfen' nachgetragen werden,
+        # sobald der Club in FC27 aktiv ist.
         ea_club_id = ""
         ea_club_name = self.ea_club_name.value
-        try:
-            async with EAProClubsAPI() as api:
-                results = await api.search_club(self.ea_club_name.value, PLATFORM_DEFAULT)
-            if results:
-                club = results[0]
-                info = club.get("clubInfo", {})
-                ea_club_id = str(info.get("clubId") or club.get("clubId") or "")
-                ea_club_name = info.get("name") or club.get("clubName") or self.ea_club_name.value
-        except Exception:
-            pass
 
         try:
             row = await pool.fetchrow(
