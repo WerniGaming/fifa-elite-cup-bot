@@ -59,9 +59,10 @@ ALLOWED_BRACKET_SIZES = [8, 12, 16, 20, 24, 32, 36, 40, 48, 64, 68, 72, 80, 96, 
 # Turnierstufen als nur 8/16/32/64/128, ohne dass jemals eine Qualifikationsrunde noetig wird.
 
 
-def group_size_for(bracket_size: int) -> int:
-    """Es gibt nur noch Vierergruppen."""
-    return 4
+def group_size_for(bracket_size: int, override: int | None = None) -> int:
+    """Standardmaessig nur noch Vierergruppen - `override` erlaubt pro Turnier eine andere
+    feste Gruppengroesse (z.B. 6er-Gruppen), siehe tournaments.group_size_override."""
+    return override or 4
 
 
 def _split_bracket_sizes(total: int) -> tuple[int, int]:
@@ -96,7 +97,7 @@ def _split_bracket_sizes(total: int) -> tuple[int, int]:
 
 # ---------- Hilfsfunktionen ----------
 
-def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int) -> int:
+def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int, group_size_override: int | None = None) -> int:
     """
     Die 'aktive Stufe' ist die groesste Turniergroesse, fuer die bereits GENUG
     Anmeldungen (registriert + Warteliste zusammen) vorliegen, um sie komplett
@@ -105,7 +106,10 @@ def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int) -> 
     sofort hochzuschalten - die naechste Stufe wird erst 'aktiv', wenn sie
     wirklich voll waere.
     """
-    candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
+    candidates = sorted(
+        s for s in ALLOWED_BRACKET_SIZES
+        if min_teams <= s <= max_teams and (not group_size_override or s % group_size_override == 0)
+    )
     if not candidates:
         return max_teams
     active = candidates[0]
@@ -117,17 +121,20 @@ def compute_bracket_size(total_signups: int, min_teams: int, max_teams: int) -> 
     return active
 
 
-def bracket_size_progression_text(min_teams: int, max_teams: int, total_signups: int) -> str:
+def bracket_size_progression_text(min_teams: int, max_teams: int, total_signups: int, group_size_override: int | None = None) -> str:
     """Zeigt konkret, ab wie vielen Anmeldungen das Turnier auf welche Groesse waechst -
     damit Teams verstehen, warum ihre Anmeldung das Turnier ggf. noch vergroessert, statt
     nur den vagen Hinweis 'die Groesse waechst automatisch' zu lesen."""
-    candidates = sorted(s for s in ALLOWED_BRACKET_SIZES if min_teams <= s <= max_teams)
+    candidates = sorted(
+        s for s in ALLOWED_BRACKET_SIZES
+        if min_teams <= s <= max_teams and (not group_size_override or s % group_size_override == 0)
+    )
     if not candidates:
         return ""
-    active = compute_bracket_size(total_signups, min_teams, max_teams)
+    active = compute_bracket_size(total_signups, min_teams, max_teams, group_size_override)
     lines = ["### 📈 Wie die Turniergröße wächst"]
     for size in candidates:
-        gsize = group_size_for(size)
+        gsize = group_size_for(size, group_size_override)
         num_groups = size // gsize
         marker = "👉" if size == active else "  "
         status = " ← **aktuell**" if size == active else ""
@@ -198,7 +205,7 @@ async def reconcile_signups(tournament_id: int) -> int:
         tournament_id,
     )
     total = len(rows)
-    bracket_size = compute_bracket_size(total, t["min_teams"], t["max_teams"])
+    bracket_size = compute_bracket_size(total, t["min_teams"], t["max_teams"], t.get("group_size_override"))
 
     for i, row in enumerate(rows, start=1):
         new_status = "registered" if i <= bracket_size else "waitlist"
@@ -1949,12 +1956,12 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
     registered = await get_registered_teams(tournament_id)
     team_ids = [r["id"] for r in registered]
 
-    bracket_size = compute_bracket_size(len(team_ids), MIN_BRACKET_SIZE, t["max_teams"])
+    bracket_size = compute_bracket_size(len(team_ids), MIN_BRACKET_SIZE, t["max_teams"], t.get("group_size_override"))
     random.shuffle(team_ids)
     while len(team_ids) < bracket_size:
         team_ids.append(None)  # Freilos - fehlende Teams bis zur Turnierstufe auffuellen
 
-    group_size = group_size_for(bracket_size)
+    group_size = group_size_for(bracket_size, t.get("group_size_override"))
     num_groups = max(1, bracket_size // group_size)
     groups: list[list[int | None]] = [[] for _ in range(num_groups)]
     for i, tid in enumerate(team_ids):
@@ -2643,8 +2650,8 @@ def estimate_schedule(t: dict, registered_count: int) -> dict:
     gruppenauslosung = start - timedelta(minutes=30)
 
     effective_count = max(registered_count, t["min_teams"])
-    bracket_size = compute_bracket_size(effective_count, MIN_BRACKET_SIZE, t["max_teams"])
-    group_size = group_size_for(bracket_size)
+    bracket_size = compute_bracket_size(effective_count, MIN_BRACKET_SIZE, t["max_teams"], t.get("group_size_override"))
+    group_size = group_size_for(bracket_size, t.get("group_size_override"))
     num_groups = max(1, bracket_size // group_size)
     teams_per_group = max(2, bracket_size // num_groups)
     matchdays = teams_per_group - 1 if teams_per_group % 2 == 0 else teams_per_group
@@ -2677,11 +2684,12 @@ class TournamentPanel(discord.ui.LayoutView):
         schedule = estimate_schedule(t, total_signups)
         rhythmus = t.get("minutes_per_round") or 20
         bracket_size = schedule.get("bracket_size", t["min_teams"])
-        group_size = group_size_for(bracket_size)
+        group_size = group_size_for(bracket_size, t.get("group_size_override"))
         num_groups = max(1, bracket_size // group_size)
+        bracket_mode_text = "Nur Winner Bracket" if t.get("single_bracket_mode") else "Winner + Loser Bracket"
 
         # Block: Kopf - Name, Größe, Eckdaten
-        header_lines = [f"# 🏆 {t['name']}", f"`{bracket_size} Teams` · {num_groups} Gruppen à {group_size} Teams · Winner + Loser Bracket"]
+        header_lines = [f"# 🏆 {t['name']}", f"`{bracket_size} Teams` · {num_groups} Gruppen à {group_size} Teams · {bracket_mode_text}"]
         header_lines.append("")
         header_lines.append(f"📅 **Start:** {fmt_date_de(schedule['turnierstart']) if schedule else '_noch nicht festgelegt_'}")
         header_lines.append(f"⏱️ **Spielrhythmus:** {rhythmus} Minuten pro Runde")
@@ -2700,7 +2708,7 @@ class TournamentPanel(discord.ui.LayoutView):
                 f"> **Anpfiff:** {fmt_time_de(schedule['turnierstart'])}",
                 "",
                 f"**Gruppenphase** _(geschätzt {schedule['matchdays']} Spieltage à {rhythmus} Min, Ende ca. {fmt_time_de(schedule['group_end'])})_",
-                f"**KO-Phase** _(geschätzt {schedule['ko_rounds']} Runden, Winner + Loser parallel)_",
+                f"**KO-Phase** _(geschätzt {schedule['ko_rounds']} Runden{', Winner + Loser parallel' if not t.get('single_bracket_mode') else ' - nur Winner Bracket'})_",
                 "",
                 f"🏁 **Voraussichtliches Ende:** {fmt_time_de(schedule['ko_end'])}",
                 f"-# Schätzung für {bracket_size}er Turnier — kann sich noch verschieben",
@@ -2734,7 +2742,7 @@ class TournamentPanel(discord.ui.LayoutView):
         # Block: konkrete Wachstumsstufen (VOR der Teamliste, damit klar ist, warum sich die
         # Groesse noch aendern kann, bevor man die aktuelle Teamliste anschaut - Buttons landen
         # dadurch automatisch weiter unten in der Nachricht, nicht gleich am Anfang).
-        progression_text = bracket_size_progression_text(t["min_teams"], t["max_teams"], total_signups)
+        progression_text = bracket_size_progression_text(t["min_teams"], t["max_teams"], total_signups, t.get("group_size_override"))
         progression_block = discord.ui.TextDisplay(progression_text) if progression_text else None
 
         closed = t["status"] != "open"
