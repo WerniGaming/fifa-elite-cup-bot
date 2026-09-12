@@ -3454,12 +3454,20 @@ class TournamentCog(commands.Cog):
                 f"{match['team1_score']}:{match['team2_score']}",
             )
             names = await team_name_map([match["team1_id"], match["team2_id"]])
-            await interaction.followup.send(
-                view=success_embed(
-                    "Ergebnis bestätigt",
-                    f"**{names.get(match['team1_id'])} {match['team1_score']}:{match['team2_score']} {names.get(match['team2_id'])}**",
+            try:
+                await interaction.followup.send(
+                    view=success_embed(
+                        "Ergebnis bestätigt",
+                        f"**{names.get(match['team1_id'])} {match['team1_score']}:{match['team2_score']} {names.get(match['team2_id'])}**",
+                    )
                 )
-            )
+            except discord.HTTPException:
+                # Das Ergebnis ist zu diesem Zeitpunkt schon final gespeichert (finalize_match_result
+                # ist bereits durchgelaufen) - nur diese abschliessende Bestaetigungs-Antwort scheitert
+                # gelegentlich (vereinzelt 404 "Unknown Message" beobachtet, Ursache nicht reproduzierbar,
+                # betrifft aber nie das eigentliche Ergebnis). Lieber leise loggen als eine spektakulaer
+                # aussehende Fehlermeldung werfen, obwohl inhaltlich alles korrekt gelaufen ist.
+                log.warning(f"Bestaetigungs-Antwort fuer Match {match_id} konnte nicht gesendet werden (Ergebnis ist trotzdem gespeichert).")
         else:
             await pool.execute(
                 """
