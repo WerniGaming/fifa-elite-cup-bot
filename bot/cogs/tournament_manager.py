@@ -2992,6 +2992,12 @@ class TournamentCreateModal(discord.ui.Modal, title="Turnier erstellen"):
             view=ChannelPickerView(tournament_id, t),
             ephemeral=True,
         )
+        from cogs.admin_panel import TournamentFormatView
+        await interaction.followup.send(
+            "Optional: Turnier-Format anpassen (Standard: 4er-Gruppen, Winner + Loser Bracket).",
+            view=TournamentFormatView(tournament_id, t),
+            ephemeral=True,
+        )
 
 
 class ChannelPickerView(discord.ui.View):

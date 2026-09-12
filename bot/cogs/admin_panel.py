@@ -810,6 +810,70 @@ class EndTournamentConfirmView(discord.ui.View):
         await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
 
 
+class TournamentFormatView(discord.ui.View):
+    """Selbstbedienung fuers Turnier-Format: Gruppengroesse + Winner-/Loser-Bracket-Modus.
+    Nur vor der Gruppenauslosung nutzbar (aendert sonst die Spielregeln mitten im Turnier)."""
+
+    def __init__(self, tournament_id: int, t: dict):
+        super().__init__(timeout=300)
+        self.tournament_id = tournament_id
+
+        current_group_size = t.get("group_size_override")
+        group_size_select = discord.ui.Select(
+            placeholder="Gruppengröße...",
+            options=[
+                discord.SelectOption(
+                    label="Nur 4er-Gruppen (Standard)", value="4",
+                    description="Mehr, kleinere Gruppen - 3 Spieltage pro Gruppe.",
+                    default=not current_group_size,
+                ),
+                discord.SelectOption(
+                    label="6er-Gruppen bevorzugt", value="6",
+                    description="Faellt automatisch auf 4er zurueck, wenn die Teamzahl nicht durch 6 teilbar ist.",
+                    default=current_group_size == 6,
+                ),
+            ],
+        )
+        group_size_select.callback = self.on_group_size
+        self.add_item(group_size_select)
+
+        current_single = bool(t.get("single_bracket_mode"))
+        bracket_select = discord.ui.Select(
+            placeholder="Bracket-Modus...",
+            options=[
+                discord.SelectOption(
+                    label="Winner + Loser Bracket (Standard)", value="both",
+                    description="Jedes Team kommt nach der Gruppenphase in eines von beiden Brackets weiter.",
+                    default=not current_single,
+                ),
+                discord.SelectOption(
+                    label="Nur Winner Bracket", value="single",
+                    description="Kein Loser-Bracket - nur die besten qualifizieren sich, der Rest ist nach den Gruppen fertig.",
+                    default=current_single,
+                ),
+            ],
+        )
+        bracket_select.callback = self.on_bracket_mode
+        self.add_item(bracket_select)
+
+    async def on_group_size(self, interaction: discord.Interaction):
+        value = int(interaction.data["values"][0])
+        override = None if value == 4 else value
+        pool = get_pool()
+        await pool.execute("UPDATE tournaments SET group_size_override = $1 WHERE id = $2", override, self.tournament_id)
+        await refresh_panel(interaction.client, self.tournament_id)
+        label = "Nur 4er-Gruppen" if override is None else "6er-Gruppen bevorzugt"
+        await interaction.response.send_message(view=success_embed(f"Gruppengröße: {label}"), ephemeral=True)
+
+    async def on_bracket_mode(self, interaction: discord.Interaction):
+        single = interaction.data["values"][0] == "single"
+        pool = get_pool()
+        await pool.execute("UPDATE tournaments SET single_bracket_mode = $1 WHERE id = $2", single, self.tournament_id)
+        await refresh_panel(interaction.client, self.tournament_id)
+        label = "Nur Winner Bracket" if single else "Winner + Loser Bracket"
+        await interaction.response.send_message(view=success_embed(f"Bracket-Modus: {label}"), ephemeral=True)
+
+
 class TournamentAdminView(discord.ui.View):
     def __init__(self, t: dict):
         super().__init__(timeout=180)
@@ -875,6 +939,24 @@ class TournamentAdminView(discord.ui.View):
         await pool.execute("UPDATE tournaments SET status = 'open' WHERE id = $1", self.t["id"])
         await refresh_panel(interaction.client, self.t["id"])
         await interaction.response.send_message(view=success_embed("Anmeldung wieder geöffnet."), ephemeral=True)
+
+    @discord.ui.button(label="⚙️ Turnier-Format", style=discord.ButtonStyle.secondary)
+    async def edit_format(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = await get_tournament(self.t["id"])
+        if t.get("phase") != "signup":
+            await interaction.response.send_message(
+                view=error_embed(
+                    "Nicht möglich",
+                    "Das Turnier-Format (Gruppengröße, Winner/Loser-Bracket) kann nur vor der Gruppenauslosung geändert werden.",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            content="Wie soll dieses Turnier ablaufen?",
+            view=TournamentFormatView(self.t["id"], t),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Gruppenphase starten", style=discord.ButtonStyle.success)
     async def start_tournament(self, interaction: discord.Interaction, button: discord.ui.Button):
