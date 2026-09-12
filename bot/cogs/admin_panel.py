@@ -705,7 +705,7 @@ class SwapActionChoiceView(discord.ui.View):
         if group:
             # Gruppenphase laeuft schon - Team sauber als Freilos raus, ohne Forfeit-Siege
             # zu verteilen (im Unterschied zu 'Team verlaesst Turnier').
-            await remove_team_from_group_as_bye(self.tournament_id, group["id"], self.team_id)
+            await remove_team_from_group_as_bye(interaction.client, interaction.guild, self.tournament_id, group["id"], self.team_id)
             await refresh_group_panel(interaction.client, group["id"])
             await refresh_live_schedule(interaction.client, interaction.guild, self.tournament_id)
         else:
@@ -822,7 +822,7 @@ class SwapInSelectView(discord.ui.View):
         group = await get_team_group(self.tournament_id, self.team_id_out)
         if group:
             # Gruppenphase laeuft schon - neues Team uebernimmt den Restspielplan direkt.
-            await replace_team_in_group(self.tournament_id, group["id"], self.team_id_out, team_id_in)
+            await replace_team_in_group(interaction.client, interaction.guild, self.tournament_id, group["id"], self.team_id_out, team_id_in)
             await refresh_group_panel(interaction.client, group["id"])
             await refresh_live_schedule(interaction.client, interaction.guild, self.tournament_id)
         else:

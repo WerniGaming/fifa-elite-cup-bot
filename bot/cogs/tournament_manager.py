@@ -24,6 +24,7 @@ from typing import Literal
 from cogs.team_manager import (
     get_team_for_user, get_team_for_user_in_group, get_team_for_user_in_tournament,
     get_role_for_user, get_team_managers, is_valid_twitch_link, team_register_hint,
+    apply_team_nickname, reset_team_nickname,
 )
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -267,13 +268,57 @@ async def get_team_group(tournament_id: int, team_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-async def remove_team_from_group_as_bye(tournament_id: int, group_id: int, team_id: int):
+async def _revoke_group_access(guild: discord.Guild, group_id: int, team_id: int):
+    """Entzieht einem Team, das eine Gruppe waehrend der laufenden Phase verlaesst, die
+    Gruppen-Rolle (=Kanalzugriff) und setzt den Team-Nickname zurueck."""
+    pool = get_pool()
+    group = await pool.fetchrow("SELECT role_id FROM tournament_groups WHERE id = $1", group_id)
+    role = guild.get_role(group["role_id"]) if group and group["role_id"] else None
+    for m in await get_team_managers(team_id):
+        member = guild.get_member(m["discord_id"])
+        if member is None:
+            try:
+                member = await guild.fetch_member(m["discord_id"])
+            except discord.HTTPException:
+                continue
+        if role:
+            try:
+                await member.remove_roles(role)
+            except discord.HTTPException:
+                pass
+        await reset_team_nickname(member)
+
+
+async def _grant_group_access(guild: discord.Guild, group_id: int, team_id: int, team_name: str):
+    """Gibt einem neu in eine laufende Gruppe eintretenden Team die Gruppen-Rolle
+    (=Kanalzugriff) und setzt den Team-Nickname - fehlte bisher komplett bei
+    replace_team_in_group(), Ersatzteams sahen die Gruppenkanaele dadurch gar nicht."""
+    pool = get_pool()
+    group = await pool.fetchrow("SELECT role_id FROM tournament_groups WHERE id = $1", group_id)
+    role = guild.get_role(group["role_id"]) if group and group["role_id"] else None
+    for m in await get_team_managers(team_id):
+        member = guild.get_member(m["discord_id"])
+        if member is None:
+            try:
+                member = await guild.fetch_member(m["discord_id"])
+            except discord.HTTPException:
+                continue
+        if role:
+            try:
+                await member.add_roles(role)
+            except discord.HTTPException:
+                pass
+        await apply_team_nickname(member, team_name)
+
+
+async def remove_team_from_group_as_bye(bot: commands.Bot, guild: discord.Guild, tournament_id: int, group_id: int, team_id: int):
     """Entfernt ein Team WAEHREND der laufenden Gruppenphase sauber als Freilos - im
     Unterschied zu withdraw_team_with_forfeits() werden KEINE Forfeit-Siege verteilt.
     Bereits gespielte Ergebnisse bleiben unveraendert stehen (echte Historie), nur noch
     offene (pending) Spiele gegen dieses Team werden ersatzlos gestrichen - die Gegner haben
     an dem Spieltag dann schlicht kein Spiel, statt einen gewerteten Freilos-Sieg zu bekommen."""
     pool = get_pool()
+    team_row = await get_pool_team(team_id)
     await pool.execute(
         "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
         tournament_id, team_id,
@@ -283,13 +328,26 @@ async def remove_team_from_group_as_bye(tournament_id: int, group_id: int, team_
         group_id, team_id,
     )
     await pool.execute("DELETE FROM tournament_group_teams WHERE group_id = $1 AND team_id = $2", group_id, team_id)
+    await _revoke_group_access(guild, group_id, team_id)
+
+    group = await pool.fetchrow("SELECT channel_id FROM tournament_groups WHERE id = $1", group_id)
+    if group and group["channel_id"]:
+        channel = guild.get_channel(group["channel_id"])
+        if channel:
+            try:
+                await channel.send(f"ℹ️ **{team_row['name']}** ist aus dieser Gruppe ausgetreten (Freilos).")
+            except discord.HTTPException:
+                pass
 
 
-async def replace_team_in_group(tournament_id: int, group_id: int, team_id_out: int, team_id_in: int):
+async def replace_team_in_group(bot: commands.Bot, guild: discord.Guild, tournament_id: int, group_id: int, team_id_out: int, team_id_in: int):
     """Ersetzt ein Team WAEHREND der laufenden Gruppenphase durch ein anderes - das neue Team
     uebernimmt alle noch OFFENEN Spiele (Restspielplan), bereits gespielte Ergebnisse bleiben
-    unter dem alten Team-Namen stehen (Historie bleibt korrekt, kein rueckwirkendes Umschreiben)."""
+    unter dem alten Team-Namen stehen (Historie bleibt korrekt, kein rueckwirkendes Umschreiben).
+    Gibt dem neuen Team auch die Gruppen-Rolle (Kanalzugriff) - fehlte vorher komplett, das
+    eingetauschte Team konnte die Gruppenkanaele gar nicht sehen."""
     pool = get_pool()
+    team_in_row = await get_pool_team(team_id_in)
     await pool.execute(
         "UPDATE tournament_signups SET status = 'withdrawn' WHERE tournament_id = $1 AND team_id = $2",
         tournament_id, team_id_out,
@@ -311,6 +369,19 @@ async def replace_team_in_group(tournament_id: int, group_id: int, team_id_out: 
         "UPDATE tournament_matches SET team2_id = $1 WHERE group_id = $2 AND status = 'pending' AND team2_id = $3",
         team_id_in, group_id, team_id_out,
     )
+
+    await _revoke_group_access(guild, group_id, team_id_out)
+    await _grant_group_access(guild, group_id, team_id_in, team_in_row["name"])
+
+    group = await pool.fetchrow("SELECT channel_id FROM tournament_groups WHERE id = $1", group_id)
+    if group and group["channel_id"]:
+        channel = guild.get_channel(group["channel_id"])
+        if channel:
+            mentions = " ".join(f"<@{m['discord_id']}>" for m in await get_team_managers(team_id_in))
+            try:
+                await channel.send(f"📢 **{team_in_row['name']}** {mentions} ist neu in dieser Gruppe - willkommen!")
+            except discord.HTTPException:
+                pass
 
 
 async def get_all_teams_for_swap(guild_id: int, tournament_id: int, exclude_team_id: int) -> list[dict]:
