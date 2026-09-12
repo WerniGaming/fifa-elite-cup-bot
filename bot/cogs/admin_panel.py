@@ -115,6 +115,59 @@ class GroupReadinessOverrideView(discord.ui.View):
         await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
 
 
+class MatchSearchModal(discord.ui.Modal, title="Match suchen"):
+    """Bei vielen gleichzeitig offenen/abgeschlossenen Matches (z.B. 6er-Gruppen mit vielen
+    Teams) zeigt ein Discord-Select maximal 25 Optionen - alles danach war bisher unsichtbar
+    und nicht auswaehlbar. Sucht per Team-Name vor, genau wie die Team-Sperren-Suche."""
+    query = discord.ui.TextInput(label="Team-Name (auch Teilstring reicht)", max_length=60)
+
+    def __init__(self, tournament_id: int, mode: str):
+        super().__init__()
+        self.tournament_id = tournament_id
+        self.mode = mode  # "open" oder "completed"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        matches = await get_all_open_matches(self.tournament_id) if self.mode == "open" else await get_all_completed_matches(self.tournament_id)
+        team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
+        names = await team_name_map(team_ids)
+        query_lower = self.query.value.lower()
+        filtered = [
+            m for m in matches
+            if query_lower in (names.get(m["team1_id"], "") or "").lower()
+            or query_lower in (names.get(m["team2_id"], "") or "").lower()
+        ]
+        if not filtered:
+            await interaction.response.send_message(view=warning_embed(f'Kein Match mit "{self.query.value}" gefunden.'), ephemeral=True)
+            return
+        if self.mode == "open":
+            await interaction.response.send_message(
+                content=f"{len(filtered)} Treffer für \"{self.query.value}\" - welches Match?",
+                view=GroupMatchSelect(filtered, names, is_admin=True),
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                content=f"{len(filtered)} Treffer für \"{self.query.value}\" - welches Match korrigieren?",
+                view=EditMatchSelectView(filtered, names),
+                ephemeral=True,
+            )
+
+
+class MatchSearchPromptView(discord.ui.View):
+    """Wird gezeigt, wenn es zu viele Matches fuer ein einzelnes Select gibt (>25) -
+    Button oeffnet die Such-Modal statt direkt eine (unvollstaendige) Liste zu zeigen."""
+
+    def __init__(self, tournament_id: int, mode: str, total_count: int):
+        super().__init__(timeout=180)
+        self.tournament_id = tournament_id
+        self.mode = mode
+        self.total_count = total_count
+
+    @discord.ui.button(label="🔍 Match suchen", style=discord.ButtonStyle.primary)
+    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(MatchSearchModal(self.tournament_id, self.mode))
+
+
 class EditMatchSelectView(discord.ui.View):
     """Auswahl eines bereits abgeschlossenen Matches zum nachtraeglichen Korrigieren."""
 
@@ -1274,6 +1327,13 @@ class TournamentAdminView(discord.ui.View):
         if not matches:
             await interaction.response.send_message(view=error_embed("Keine offenen Matches gefunden."), ephemeral=True)
             return
+        if len(matches) > 25:
+            await interaction.response.send_message(
+                content=f"{len(matches)} offene Matches - zu viele für eine Liste (Discord-Limit: 25). Bitte suchen:",
+                view=MatchSearchPromptView(self.t["id"], "open", len(matches)),
+                ephemeral=True,
+            )
+            return
         team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
         names = await team_name_map(team_ids)
         await interaction.response.send_message(
@@ -1287,6 +1347,13 @@ class TournamentAdminView(discord.ui.View):
         matches = await get_all_completed_matches(self.t["id"])
         if not matches:
             await interaction.response.send_message(view=error_embed("Keine abgeschlossenen Matches gefunden."), ephemeral=True)
+            return
+        if len(matches) > 25:
+            await interaction.response.send_message(
+                content=f"{len(matches)} abgeschlossene Matches - zu viele für eine Liste (Discord-Limit: 25). Bitte suchen:",
+                view=MatchSearchPromptView(self.t["id"], "completed", len(matches)),
+                ephemeral=True,
+            )
             return
         team_ids = [m["team1_id"] for m in matches] + [m["team2_id"] for m in matches]
         names = await team_name_map(team_ids)

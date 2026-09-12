@@ -23,7 +23,7 @@ from discord.ext import commands
 
 from db import get_pool
 from ui_helpers import error_embed
-from cogs.team_manager import get_team_for_user, get_team_managers
+from cogs.team_manager import get_team_for_user, get_team_managers, team_register_hint
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 FRIENDLY_BANNER_PATH = os.path.join(ASSETS_DIR, "friendly_banner.jpg")
@@ -325,8 +325,9 @@ class FriendliesCog(commands.Cog):
         if action == "new":
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
+                channel_hint = await team_register_hint(interaction.guild_id)
                 await interaction.response.send_message(
-                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."),
+                    view=error_embed("Du hast noch kein Team.", f"Erst {channel_hint} -> 'Team gründen' klicken."),
                     ephemeral=True,
                 )
                 return
@@ -342,8 +343,9 @@ class FriendliesCog(commands.Cog):
             request = await pool.fetchrow("SELECT * FROM friendly_requests WHERE id = $1", slot["request_id"])
             accepting_team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not accepting_team:
+                channel_hint = await team_register_hint(interaction.guild_id)
                 await interaction.response.send_message(
-                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."),
+                    view=error_embed("Du hast noch kein Team.", f"Erst {channel_hint} -> 'Team gründen' klicken."),
                     ephemeral=True,
                 )
                 return

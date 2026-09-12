@@ -429,6 +429,16 @@ async def get_team_for_user(guild_id: int, user_id: int):
     return row
 
 
+async def team_register_hint(guild_id: int) -> str:
+    """Verlinkt direkt den Team-Manager-Panel-Kanal (statt ihn nur zu benennen) - Teams
+    mussten den Kanal bisher selbst suchen, wenn eine 'du hast kein Team'-Meldung kam."""
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT team_register_channel_id FROM guild_settings WHERE guild_id = $1", guild_id)
+    if row and row["team_register_channel_id"]:
+        return f"<#{row['team_register_channel_id']}>"
+    return "im Team-Manager-Panel"
+
+
 async def get_team_for_user_in_group(group_id: int, user_id: int):
     """Wie get_team_for_user, aber auf eine Turnier-Gruppe eingeschraenkt - noetig, weil ein
     Co-Manager Co-Manager MEHRERER Teams sein kann (z.B. als Aushilfe). get_team_for_user

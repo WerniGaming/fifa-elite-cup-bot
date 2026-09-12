@@ -22,7 +22,7 @@ from discord.ext import commands
 from db import get_pool
 from permissions import is_tournament_admin
 from ui_helpers import error_embed
-from cogs.team_manager import get_team_for_user, get_team_managers
+from cogs.team_manager import get_team_for_user, get_team_managers, team_register_hint
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets")
 
@@ -264,8 +264,9 @@ class RequestDescriptionModal(discord.ui.Modal, title="Aushilfe gesucht"):
     async def on_submit(self, interaction: discord.Interaction):
         team = await get_team_for_user(interaction.guild_id, interaction.user.id)
         if not team:
+            channel_hint = await team_register_hint(interaction.guild_id)
             await interaction.response.send_message(
-                view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
+                view=error_embed("Du hast noch kein Team.", f"Erst {channel_hint} -> 'Team gründen' klicken."), ephemeral=True
             )
             return
         pool = get_pool()
@@ -430,8 +431,9 @@ class SubstitutesCog(commands.Cog):
         elif action == "request_start":
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
+                channel_hint = await team_register_hint(interaction.guild_id)
                 await interaction.response.send_message(
-                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
+                    view=error_embed("Du hast noch kein Team.", f"Erst {channel_hint} -> 'Team gründen' klicken."), ephemeral=True
                 )
                 return
             await interaction.response.send_message(
@@ -447,8 +449,9 @@ class SubstitutesCog(commands.Cog):
                 return
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
+                channel_hint = await team_register_hint(interaction.guild_id)
                 await interaction.response.send_message(
-                    view=error_embed("Du hast noch kein Team.", "Registriere zuerst dein Team im Team-Manager-Panel."), ephemeral=True
+                    view=error_embed("Du hast noch kein Team.", f"Erst {channel_hint} -> 'Team gründen' klicken."), ephemeral=True
                 )
                 return
             existing = await pool.fetchrow("SELECT 1 FROM substitute_offer_candidates WHERE offer_id = $1 AND team_id = $2", offer_id, team["id"])

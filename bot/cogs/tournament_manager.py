@@ -23,7 +23,7 @@ from permissions import is_tournament_admin, is_tournament_moderator
 from typing import Literal
 from cogs.team_manager import (
     get_team_for_user, get_team_for_user_in_group, get_team_for_user_in_tournament,
-    get_role_for_user, get_team_managers, is_valid_twitch_link,
+    get_role_for_user, get_team_managers, is_valid_twitch_link, team_register_hint,
 )
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -3457,8 +3457,9 @@ class TournamentCog(commands.Cog):
 
             team = await get_team_for_user(interaction.guild_id, interaction.user.id)
             if not team:
+                channel_hint = await team_register_hint(interaction.guild_id)
                 await interaction.response.send_message(
-                    view=error_embed("Du brauchst zuerst ein Team", "siehe Team Manager Panel -> 'Team gründen'."), ephemeral=True
+                    view=error_embed("Du brauchst zuerst ein Team", f"Erst {channel_hint} -> 'Team gründen' klicken."), ephemeral=True
                 )
                 return
 

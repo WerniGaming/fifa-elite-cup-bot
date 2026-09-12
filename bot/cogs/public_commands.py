@@ -182,8 +182,10 @@ class PublicCommandsCog(commands.Cog):
             interaction.guild_id, interaction.user.id,
         )
         if not row:
+            from cogs.team_manager import team_register_hint
+            channel_hint = await team_register_hint(interaction.guild_id)
             await interaction.response.send_message(
-                view=error_embed("Du hast kein Team", "Siehe Team-Manager-Panel -> 'Team gründen'."), ephemeral=True
+                view=error_embed("Du hast kein Team", f"Erst {channel_hint} -> 'Team gründen' klicken."), ephemeral=True
             )
             return
         stats = await pool.fetchrow(
