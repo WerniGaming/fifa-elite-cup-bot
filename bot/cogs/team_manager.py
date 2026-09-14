@@ -495,10 +495,46 @@ async def get_team_managers(team_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def team_info_text(team: dict, owner_id: int | None, comanager_ids: list[int], user_role: str | None) -> str:
+async def get_team_stats(team_id: int) -> dict:
+    """Echte Turnier-Statistiken direkt aus unseren eigenen tournament_matches -
+    unabhaengig von der EA-API (funktioniert also auch waehrend EA gerade auf FC27
+    umstellt und Auto-Erkennung/Awards nicht laufen). 'Turniersiege' = Anzahl Turniere,
+    bei denen dieses Team Winner- ODER Loser-Bracket-Champion wurde."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT
+          COUNT(*) AS games,
+          COUNT(*) FILTER (WHERE winner_id = $1) AS wins,
+          COUNT(*) FILTER (WHERE winner_id IS NULL AND team1_id IS NOT NULL AND team2_id IS NOT NULL) AS draws,
+          COALESCE(SUM(CASE WHEN team1_id = $1 THEN team1_score WHEN team2_id = $1 THEN team2_score ELSE 0 END), 0) AS goals_for,
+          COALESCE(SUM(CASE WHEN team1_id = $1 THEN team2_score WHEN team2_id = $1 THEN team1_score ELSE 0 END), 0) AS goals_against
+        FROM tournament_matches
+        WHERE status = 'completed' AND (team1_id = $1 OR team2_id = $1)
+        """,
+        team_id,
+    )
+    games, wins, draws = row["games"], row["wins"], row["draws"]
+    losses = games - wins - draws
+    titles_row = await pool.fetchrow(
+        "SELECT COUNT(*) FILTER (WHERE winner_champion_id = $1) AS winner_titles, "
+        "COUNT(*) FILTER (WHERE loser_champion_id = $1) AS loser_titles FROM tournaments WHERE winner_champion_id = $1 OR loser_champion_id = $1",
+        team_id,
+    )
+    return {
+        "games": games, "wins": wins, "draws": draws, "losses": losses,
+        "winrate": round(wins / games * 100) if games else 0,
+        "goals_for": row["goals_for"] or 0, "goals_against": row["goals_against"] or 0,
+        "winner_titles": titles_row["winner_titles"], "loser_titles": titles_row["loser_titles"],
+    }
+
+
+async def team_info_text(team: dict, owner_id: int | None, comanager_ids: list[int], user_role: str | None) -> str:
     owner_mention = f"<@{owner_id}>" if owner_id else "_unbekannt_"
     comanager_text = ", ".join(f"<@{cid}>" for cid in comanager_ids) if comanager_ids else "_Keine_"
     notif_text = "An" if team["notifications_enabled"] else "Aus"
+    s = await get_team_stats(team["id"])
+    goal_diff = s["goals_for"] - s["goals_against"]
     lines = [
         f"## {team['name']}",
         "",
@@ -509,10 +545,19 @@ def team_info_text(team: dict, owner_id: int | None, comanager_ids: list[int], u
         f"**Benachrichtigungen:** {notif_text}",
         "",
         "**Turnier-Statistiken:**",
-        "Spiele: 0 (0S / 0U / 0N)",
-        "Winrate: 0%",
-        "Tore: 0:0 (+0)",
+        f"Spiele: {s['games']} ({s['wins']}S / {s['draws']}U / {s['losses']}N)",
+        f"Winrate: {s['winrate']}%",
+        f"Tore: {s['goals_for']}:{s['goals_against']} ({goal_diff:+d})",
     ]
+    if s["winner_titles"] or s["loser_titles"]:
+        title_bits = []
+        if s["winner_titles"]:
+            title_bits.append(f"🏆 {s['winner_titles']}× Winner-Bracket")
+        if s["loser_titles"]:
+            title_bits.append(f"🥈 {s['loser_titles']}× Loser-Bracket")
+        lines.append(f"Turniersiege: {' · '.join(title_bits)}")
+    else:
+        lines.append("Turniersiege: _noch keine_")
     return "\n".join(lines)
 
 
@@ -1284,7 +1329,7 @@ class TeamManagerCog(commands.Cog):
             comanager_ids = [m["discord_id"] for m in managers if m["role"] == "co_manager"]
             role = await get_role_for_user(team["id"], interaction.user.id)
             await interaction.response.send_message(
-                team_info_text(team, owner_id, comanager_ids, role), ephemeral=True
+                await team_info_text(team, owner_id, comanager_ids, role), ephemeral=True
             )
 
         elif action == "logo":
