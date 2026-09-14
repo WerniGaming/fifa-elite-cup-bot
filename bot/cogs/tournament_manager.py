@@ -223,6 +223,34 @@ async def reconcile_signups(tournament_id: int) -> int:
     return bracket_size
 
 
+def compute_fill_with_bye_options(total_signups: int) -> list[dict]:
+    """Fuer 'Jetzt mit Freilos auffuellen': zeigt, wie viele Byes bei 4er- bzw. 6er-Gruppen
+    noetig waeren, um ALLE aktuellen Anmeldungen (inkl. Warteliste) sofort mitzunehmen, statt
+    auf die naechste feste Turnierstufe zu warten. Kein Bezug zu ALLOWED_BRACKET_SIZES - das
+    ist bewusst eine Turnierstufe ausserhalb der Norm, extra fuer diesen Fall."""
+    options = []
+    for group_size in (4, 6):
+        padded = math.ceil(max(total_signups, MIN_BRACKET_SIZE) / group_size) * group_size
+        options.append({"group_size": group_size, "bracket_size": padded, "byes": padded - total_signups})
+    return options
+
+
+async def fill_with_bye_and_start(tournament_id: int, bracket_size: int, group_size: int):
+    """Setzt die Turnierstufe manuell auf `bracket_size` (siehe compute_fill_with_bye_options)
+    und nimmt ALLE Warteliste-Teams sofort mit auf - fuer den Fall '1-2 Teams fehlen noch bis
+    zur naechsten Stufe, wir wollen aber jetzt schon mit Freilos starten' statt laenger auf
+    weitere echte Anmeldungen zu warten."""
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tournament_signups SET status = 'registered' WHERE tournament_id = $1 AND status = 'waitlist'",
+        tournament_id,
+    )
+    await pool.execute(
+        "UPDATE tournaments SET custom_bracket_size = $1, group_size_override = $2 WHERE id = $3",
+        bracket_size, group_size, tournament_id,
+    )
+
+
 async def swap_team_for_bye(tournament_id: int, team_id: int):
     """Entfernt ein registriertes Team ohne Nachruecken (Freilos)."""
     pool = get_pool()
@@ -2066,7 +2094,12 @@ async def start_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_
     registered = await get_registered_teams(tournament_id)
     team_ids = [r["id"] for r in registered]
 
-    bracket_size = compute_bracket_size(len(team_ids), MIN_BRACKET_SIZE, t["max_teams"], t.get("group_size_override"))
+    # custom_bracket_size umgeht die feste Stufenliste (siehe fill_with_bye_and_promote_waitlist) -
+    # fuer den Fall, dass ein Admin bewusst "jetzt mit Freilos starten" gewaehlt hat, statt auf
+    # eine weitere echte Anmeldung zu warten.
+    bracket_size = t.get("custom_bracket_size") or compute_bracket_size(
+        len(team_ids), MIN_BRACKET_SIZE, t["max_teams"], t.get("group_size_override")
+    )
     random.shuffle(team_ids)
     while len(team_ids) < bracket_size:
         team_ids.append(None)  # Freilos - fehlende Teams bis zur Turnierstufe auffuellen

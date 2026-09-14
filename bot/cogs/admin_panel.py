@@ -927,6 +927,44 @@ class TournamentFormatView(discord.ui.View):
         await interaction.response.send_message(view=success_embed(f"Bracket-Modus: {label}"), ephemeral=True)
 
 
+class FillWithByeView(discord.ui.View):
+    """Zeigt die 4er- und 6er-Gruppen-Option fuer 'Jetzt mit Freilos auffuellen' - jeweils mit
+    Angabe, wie viele Freilose das braucht, damit klar ist, welche Option weniger 'verschenkte'
+    Plaetze hat (kleinere Gruppengroesse braucht i.d.R. weniger Freilose)."""
+
+    def __init__(self, tournament_id: int, total: int, options: list[dict]):
+        super().__init__(timeout=180)
+        self.tournament_id = tournament_id
+        self.total = total
+        for opt in options:
+            btn = discord.ui.Button(
+                label=f"{opt['group_size']}er-Gruppen ({opt['bracket_size']} Plätze, {opt['byes']} Freilos)",
+                style=discord.ButtonStyle.primary,
+            )
+            btn.callback = self._make_callback(opt["bracket_size"], opt["group_size"])
+            self.add_item(btn)
+
+    def _make_callback(self, bracket_size: int, group_size: int):
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            from cogs.tournament_manager import fill_with_bye_and_start, get_tournament, start_group_phase
+            await fill_with_bye_and_start(self.tournament_id, bracket_size, group_size)
+            pool = get_pool()
+            await pool.execute("UPDATE tournaments SET status = 'started' WHERE id = $1", self.tournament_id)
+            t = await get_tournament(self.tournament_id)
+            await refresh_panel(interaction.client, self.tournament_id)
+            await start_group_phase(interaction.client, interaction.guild, self.tournament_id, t)
+            await interaction.followup.send(
+                view=success_embed(
+                    f"{t['name']} — gestartet mit {bracket_size} Plätzen ({group_size}er-Gruppen)!",
+                    f"Alle {self.total} Anmeldungen (inkl. Warteliste) sind dabei, {bracket_size - self.total} Freilos-Plätze aufgefüllt. "
+                    "Gruppenkanäle wurden angelegt.",
+                ),
+                ephemeral=True,
+            )
+        return callback
+
+
 class TournamentAdminView(discord.ui.View):
     def __init__(self, t: dict):
         super().__init__(timeout=180)
@@ -1008,6 +1046,30 @@ class TournamentAdminView(discord.ui.View):
         await interaction.response.send_message(
             content="Wie soll dieses Turnier ablaufen?",
             view=TournamentFormatView(self.t["id"], t),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="🎟️ Mit Freilos auffüllen", style=discord.ButtonStyle.secondary)
+    async def fill_with_bye(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Fuer '1-2 Teams fehlen noch bis zur naechsten Turnierstufe' - nimmt ALLE aktuellen
+        Anmeldungen (inkl. Warteliste) sofort mit, statt auf weitere echte Anmeldungen zu warten,
+        und fuellt die Luecke zur naechsten durch 4 bzw. 6 teilbaren Gruppengroesse mit Freilosen."""
+        t = await get_tournament(self.t["id"])
+        if t.get("phase") != "signup":
+            await interaction.response.send_message(
+                view=error_embed("Nicht möglich", "Geht nur, solange die Anmeldung noch läuft."), ephemeral=True
+            )
+            return
+        registered, waitlist = await get_signup_counts(self.t["id"])
+        total = registered + waitlist
+        if total < 2:
+            await interaction.response.send_message(view=error_embed("Zu wenige Anmeldungen."), ephemeral=True)
+            return
+        from cogs.tournament_manager import compute_fill_with_bye_options
+        options = compute_fill_with_bye_options(total)
+        await interaction.response.send_message(
+            content=f"Aktuell **{total}** Anmeldungen (davon {waitlist} auf der Warteliste). Womit auffüllen und sofort starten?",
+            view=FillWithByeView(self.t["id"], total, options),
             ephemeral=True,
         )
 
