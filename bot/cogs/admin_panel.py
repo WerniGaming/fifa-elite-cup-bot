@@ -28,6 +28,7 @@ from cogs.tournament_manager import (
     get_waitlisted_teams,
     get_all_teams_for_swap,
     get_unready_groups,
+    get_unready_teams,
     start_group_phase,
     release_first_matchday,
     start_knockout_phase,
@@ -1143,6 +1144,39 @@ class TournamentAdminView(discord.ui.View):
 
         await release_first_matchday(interaction.client, interaction.guild, self.t["id"])
         await interaction.followup.send(view=success_embed("Spieltag 1 freigegeben!"), ephemeral=True)
+
+    @discord.ui.button(label="🔔 Unbestätigte erinnern", style=discord.ButtonStyle.secondary)
+    async def remind_unready_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Schickt allen Managern von Teams, die 'Team ist da' noch nicht bestaetigt haben,
+        eine DM-Erinnerung - fuer den Fall, dass Teams das vor Spieltag-Freigabe verpennen."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        t = await get_tournament(self.t["id"])
+        if t.get("phase") != "groups":
+            await interaction.followup.send(
+                view=error_embed("Geht nur, solange die Gruppenphase läuft (nach der Auslosung)."), ephemeral=True
+            )
+            return
+        unready = await get_unready_teams(self.t["id"])
+        if not unready:
+            await interaction.followup.send(view=success_embed("Alle Teams sind bereits bestätigt! ✅"), ephemeral=True)
+            return
+        sent = 0
+        for row in unready:
+            for m in await get_team_managers(row["team_id"]):
+                try:
+                    user = await interaction.client.fetch_user(m["discord_id"])
+                    await user.send(
+                        f"📢 **Erinnerung:** Euer Team **{row['team_name']}** hat für **{t['name']}** "
+                        f"(Gruppe {row['group_number']}) noch nicht 'Team ist da' bestätigt! "
+                        "Bitte klickt im Gruppenpanel auf ✅ **Team ist da**, damit es rund läuft."
+                    )
+                    sent += 1
+                except discord.HTTPException:
+                    pass
+        team_list = ", ".join(r["team_name"] for r in unready)
+        await interaction.followup.send(
+            view=success_embed(f"{sent} DM(s) verschickt.", f"Noch unbestätigt: {team_list}"), ephemeral=True
+        )
 
     @discord.ui.button(label="Live-Spielplan posten", style=discord.ButtonStyle.secondary)
     async def post_live_schedule_button(self, interaction: discord.Interaction, button: discord.ui.Button):

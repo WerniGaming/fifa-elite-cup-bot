@@ -182,6 +182,23 @@ async def get_unready_groups(tournament_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_unready_teams(tournament_id: int) -> list[dict]:
+    """Einzelne Teams dieses Turniers, die noch nicht 'Team ist da' bestaetigt haben."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT tgt.team_id, te.name AS team_name, tg.group_number
+        FROM tournament_group_teams tgt
+        JOIN tournament_groups tg ON tg.id = tgt.group_id
+        JOIN teams te ON te.id = tgt.team_id
+        WHERE tg.tournament_id = $1 AND NOT tgt.confirmed_ready
+        ORDER BY tg.group_number
+        """,
+        tournament_id,
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_signup_counts(tournament_id: int) -> tuple[int, int]:
     pool = get_pool()
     registered = await pool.fetchval(
