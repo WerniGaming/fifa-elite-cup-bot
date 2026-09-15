@@ -990,26 +990,8 @@ class TournamentAdminView(discord.ui.View):
     @discord.ui.button(label="Anmeldung schließen", style=discord.ButtonStyle.secondary)
     async def close_signup(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
-        pool = get_pool()
-        await pool.execute("UPDATE tournaments SET status = 'closed' WHERE id = $1", self.t["id"])
-        await refresh_panel(interaction.client, self.t["id"])
-
-        t = await get_tournament(self.t["id"])
-        registered = await get_registered_teams(self.t["id"])
-        for team in registered:
-            managers = await get_team_managers(team["id"])
-            for m in managers:
-                try:
-                    user = await interaction.client.fetch_user(m["discord_id"])
-                    dm_embed = warning_embed(
-                        f"Anmeldung für {t['name']} geschlossen!",
-                        f"**{team['name']}** ist jetzt fest angemeldet. Sobald die Gruppen ausgelost sind, "
-                        "meldet euch dort im Gruppen-Panel über den Button 'Team ist da' als bereit.",
-                    )
-                    await user.send(embed=dm_embed)
-                except discord.HTTPException:
-                    pass
-
+        from cogs.tournament_manager import close_tournament_signup
+        await close_tournament_signup(interaction.client, self.t["id"])
         await interaction.followup.send(
             view=success_embed("Anmeldung geschlossen", "Teams wurden per DM informiert."),
             ephemeral=True,

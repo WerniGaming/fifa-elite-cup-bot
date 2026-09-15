@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from db import get_pool
 from ui_helpers import success_embed, error_embed, info_embed, warning_embed, WEBSITE_URL
@@ -3008,6 +3008,31 @@ async def refresh_panel(bot: commands.Bot, tournament_id: int):
         await msg.edit(view=panel)
 
 
+async def close_tournament_signup(bot: commands.Bot, tournament_id: int) -> None:
+    """Schliesst die Anmeldung (manuell per Admin-Button oder automatisch 2h vor Start) und
+    informiert alle fest angemeldeten Teams per DM. Gemeinsame Logik, damit beide Wege
+    (Button in admin_panel.py, automatischer Task hier unten) nicht auseinanderlaufen."""
+    pool = get_pool()
+    await pool.execute("UPDATE tournaments SET status = 'closed' WHERE id = $1", tournament_id)
+    await refresh_panel(bot, tournament_id)
+
+    t = await get_tournament(tournament_id)
+    registered = await get_registered_teams(tournament_id)
+    for team in registered:
+        for m in await get_team_managers(team["id"]):
+            try:
+                user = await bot.fetch_user(m["discord_id"])
+                await user.send(
+                    embed=warning_embed(
+                        f"Anmeldung für {t['name']} geschlossen!",
+                        f"**{team['name']}** ist jetzt fest angemeldet. Sobald die Gruppen ausgelost sind, "
+                        "meldet euch dort im Gruppen-Panel über den Button 'Team ist da' als bereit.",
+                    )
+                )
+            except discord.HTTPException:
+                pass
+
+
 async def handle_external_signup_change(bot: commands.Bot, tournament_id: int, team_id: int):
     """Reagiert auf eine An-/Abmeldung, die ueber die Website (statt Discord) passiert ist -
     aktualisiert das Discord-Panel und legt bei Spendenturnieren bei Bedarf den
@@ -3211,9 +3236,45 @@ class TournamentStreamLinkModal(discord.ui.Modal, title="Stream-Link ändern"):
             await interaction.response.send_message(view=info_embed("Stream-Link entfernt."), ephemeral=True)
 
 
+SIGNUP_AUTO_CLOSE_BEFORE_START = timedelta(hours=2)
+
+
 class TournamentCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self):
+        self._auto_close_signup_task.start()
+
+    def cog_unload(self):
+        self._auto_close_signup_task.cancel()
+
+    @tasks.loop(minutes=5)
+    async def _auto_close_signup_task(self):
+        """Schliesst automatisch 2h vor Turnierstart die Anmeldung (fuer jedes Turnier,
+        nicht nur manuell auf Knopfdruck). Admins koennen danach jederzeit ueber den
+        Panel-Button wieder oeffnen/schliessen, Teams tauschen oder mit Freilos auffuellen -
+        signup_auto_closed sorgt nur dafuer, dass der Task ein manuelles Wieder-Oeffnen
+        nicht sofort wieder zumacht."""
+        pool = get_pool()
+        due = await pool.fetch(
+            """
+            SELECT id FROM tournaments
+            WHERE status = 'open' AND NOT signup_auto_closed
+              AND start_time IS NOT NULL AND start_time <= now() + $1
+            """,
+            SIGNUP_AUTO_CLOSE_BEFORE_START,
+        )
+        for row in due:
+            await pool.execute("UPDATE tournaments SET signup_auto_closed = true WHERE id = $1", row["id"])
+            try:
+                await close_tournament_signup(self.bot, row["id"])
+            except Exception:
+                log.exception(f"Fehler beim automatischen Schliessen der Anmeldung fuer Turnier {row['id']}")
+
+    @_auto_close_signup_task.before_loop
+    async def _before_auto_close_signup_task(self):
+        await self.bot.wait_until_ready()
 
     async def handle_group_action(self, interaction: discord.Interaction, custom_id: str):
         _, gid_str, action = custom_id.split(":", 2)
