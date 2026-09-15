@@ -2721,15 +2721,25 @@ async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     all_seeds.sort(key=_seed_key)
 
     if t.get("single_bracket_mode"):
-        # Nur ein einziges KO-Bracket (kein Loser-Bracket) - die Top-N (groesste 2er-Potenz
-        # <= HALBE Gesamtzahl, analog zur "oberen Haelfte" beim normalen Winner-Bracket-Split)
-        # ziehen in eine normale Einzel-KO-Phase ein, der Rest ist nach der Gruppenphase fertig
-        # (Endplatzierung anhand der Gruppentabelle). Wichtig: <= total//2, NICHT <= total -
-        # sonst wuerden bei z.B. 36 Teams satte 32 davon durchgewunken statt nur die besten
-        # Haelfte gefiltert (Gruppenphase haette dann kaum noch eine Aussiebe-Wirkung).
-        winner_size = 1
-        while winner_size * 2 <= len(all_seeds) // 2:
-            winner_size *= 2
+        per_group = t.get("single_bracket_advance_per_group")
+        if per_group:
+            # Feste Anzahl PRO GRUPPE (z.B. "nur 1. und 2.") statt der generischen
+            # Zweierpotenz-Haelfte - fuer Faelle wie viele ausgefallene Teams/Freilose,
+            # wo die Gruppen unterschiedlich gross sind und trotzdem ein klarer, fairer
+            # Schnitt pro Gruppe gewollt ist. create_bracket() kommt auch mit einer
+            # Nicht-Zweierpotenz-Teamzahl klar (Qualifikationsrunde fuer den Ueberschuss).
+            winner_teams_seeds = [s for s in all_seeds if s["tier"] < per_group]
+            winner_size = len(winner_teams_seeds)
+        else:
+            # Nur ein einziges KO-Bracket (kein Loser-Bracket) - die Top-N (groesste 2er-Potenz
+            # <= HALBE Gesamtzahl, analog zur "oberen Haelfte" beim normalen Winner-Bracket-Split)
+            # ziehen in eine normale Einzel-KO-Phase ein, der Rest ist nach der Gruppenphase fertig
+            # (Endplatzierung anhand der Gruppentabelle). Wichtig: <= total//2, NICHT <= total -
+            # sonst wuerden bei z.B. 36 Teams satte 32 davon durchgewunken statt nur die besten
+            # Haelfte gefiltert (Gruppenphase haette dann kaum noch eine Aussiebe-Wirkung).
+            winner_size = 1
+            while winner_size * 2 <= len(all_seeds) // 2:
+                winner_size *= 2
         loser_size = 0
     else:
         winner_size, loser_size = _split_bracket_sizes(len(all_seeds))
