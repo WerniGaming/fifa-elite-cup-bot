@@ -33,6 +33,7 @@ from cogs.tournament_manager import (
     release_first_matchday,
     start_knockout_phase,
     reset_knockout_phase,
+    reset_group_phase,
     all_groups_complete,
     refresh_panel,
     get_all_open_matches,
@@ -493,6 +494,82 @@ class ResetKoConfirmView(discord.ui.View):
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
+
+
+class RegroupConfirmView(discord.ui.View):
+    """Loescht die aktuelle Gruppenauslosung unwiderruflich und lost mit der gewaehlten
+    Gruppengroesse neu aus - fuer den Fall, dass das Turnier-Format (4er/6er-Gruppen) noch
+    waehrend laufender Gruppenphase geaendert werden muss."""
+
+    def __init__(self, tournament_id: int, group_size_override: int | None):
+        super().__init__(timeout=120)
+        self.tournament_id = tournament_id
+        self.group_size_override = group_size_override
+
+    @discord.ui.button(label="Ja, neu auslosen", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await reset_group_phase(interaction.client, interaction.guild, self.tournament_id, self.group_size_override)
+            t = await get_tournament(self.tournament_id)
+            await start_group_phase(interaction.client, interaction.guild, self.tournament_id, t)
+            await release_first_matchday(interaction.client, interaction.guild, self.tournament_id)
+            from audit import log_action
+            await log_action(
+                interaction.guild_id, interaction.user, "tournament.groups_redrawn",
+                "tournament", self.tournament_id, "Gruppenphase zurückgesetzt & neu ausgelost",
+            )
+            await interaction.followup.send(
+                view=success_embed(
+                    "Gruppen wurden neu ausgelost",
+                    "Alle bisherigen Gruppenergebnisse wurden dabei gelöscht. Spieltag 1 wurde direkt freigegeben.",
+                ),
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception(f"Fehler beim Neu-Auslosen der Gruppenphase fuer Turnier {self.tournament_id}")
+            await interaction.followup.send(
+                view=error_embed(
+                    "Fehler beim Neu-Auslosen",
+                    "Bitte im Bot-Log nachschauen (`sudo journalctl -u fifa-elite-cup-v2 -n 50 --no-pager`).",
+                ),
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=None, view=info_embed("Abgebrochen."))
+
+
+class RegroupSizeView(discord.ui.View):
+    """Auswahl der neuen Gruppengroesse, bevor die laufende Gruppenphase neu ausgelost wird."""
+
+    def __init__(self, tournament_id: int):
+        super().__init__(timeout=120)
+        select = discord.ui.Select(
+            placeholder="Neue Gruppengröße...",
+            options=[
+                discord.SelectOption(label="Nur 4er-Gruppen", value="4", description="Mehr, kleinere Gruppen - 3 Spieltage pro Gruppe."),
+                discord.SelectOption(label="6er-Gruppen bevorzugt", value="6", description="Faellt automatisch auf 4er zurueck, wenn nicht durch 6 teilbar."),
+            ],
+        )
+        select.callback = self.on_select
+        self.tournament_id = tournament_id
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        value = int(interaction.data["values"][0])
+        override = None if value == 4 else value
+        label = "4er-Gruppen" if override is None else "6er-Gruppen bevorzugt"
+        await interaction.response.send_message(
+            content=(
+                "⚠️ **Sicher?** Löscht alle bestehenden Gruppen-Kanäle, -Rollen und Gruppen-Ergebnisse "
+                f"unwiderruflich und lost alle angemeldeten Teams neu aus ({label}). Die KO-Phase ist davon "
+                "nicht betroffen (muss vorher separat über 'KO-Phase resetten' zurückgesetzt sein, falls sie schon lief)."
+            ),
+            view=RegroupConfirmView(self.tournament_id, override),
+            ephemeral=True,
+        )
 
 
 class DonationConfigModal(discord.ui.Modal, title="Spendenturnier einrichten"):
@@ -1029,6 +1106,29 @@ class TournamentAdminView(discord.ui.View):
         await interaction.response.send_message(
             content="Wie soll dieses Turnier ablaufen?",
             view=TournamentFormatView(self.t["id"], t),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="🔄 Gruppen neu auslosen", style=discord.ButtonStyle.danger)
+    async def regroup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Fuer den Fall, dass die Gruppengroesse noch geaendert werden muss, obwohl die
+        Auslosung schon gelaufen ist (Turnier-Format-Button geht dann nicht mehr, siehe
+        edit_format oben) - loescht die aktuelle Auslosung und macht sie mit neuer
+        Gruppengroesse neu."""
+        t = await get_tournament(self.t["id"])
+        if t.get("phase") != "groups":
+            await interaction.response.send_message(
+                view=error_embed(
+                    "Nicht möglich",
+                    "Neu-Auslosen ist nur möglich, solange sich das Turnier in der Gruppenphase befindet "
+                    "(läuft schon die KO-Phase, erst mit 'KO-Phase resetten' zurücksetzen).",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            content="Mit welcher Gruppengröße soll neu ausgelost werden?",
+            view=RegroupSizeView(self.t["id"]),
             ephemeral=True,
         )
 

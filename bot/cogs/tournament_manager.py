@@ -2675,6 +2675,58 @@ async def reset_knockout_phase(bot: commands.Bot, guild: discord.Guild, tourname
     )
 
 
+async def reset_group_phase(bot: commands.Bot, guild: discord.Guild, tournament_id: int, new_group_size_override: int | None = None):
+    """
+    Loescht die komplette Gruppenphase (Gruppen-/Panel-Kanaele/-Rollen + Kategorie + alle
+    Gruppen-Matches und -Zuordnungen) und setzt das Turnier zurueck auf 'signup', damit die
+    Gruppenauslosung sauber neu gemacht werden kann (z.B. mit geaenderter Gruppengroesse).
+    Angemeldete Teams (tournament_signups) bleiben unangetastet. Ruehrt eine bereits gestartete
+    KO-Phase NICHT an - die muss vorher separat ueber reset_knockout_phase() zurueckgesetzt werden.
+    """
+    pool = get_pool()
+
+    groups = await pool.fetch("SELECT * FROM tournament_groups WHERE tournament_id = $1", tournament_id)
+    for g in groups:
+        if g["channel_id"]:
+            ch = guild.get_channel(g["channel_id"])
+            if ch:
+                try:
+                    await ch.delete(reason="Gruppenphase zurueckgesetzt")
+                except discord.HTTPException:
+                    pass
+        if g["panel_channel_id"]:
+            ch = guild.get_channel(g["panel_channel_id"])
+            if ch:
+                try:
+                    await ch.delete(reason="Gruppenphase zurueckgesetzt")
+                except discord.HTTPException:
+                    pass
+        if g["role_id"]:
+            role = guild.get_role(g["role_id"])
+            if role:
+                try:
+                    await role.delete(reason="Gruppenphase zurueckgesetzt")
+                except discord.HTTPException:
+                    pass
+
+    t = await get_tournament(tournament_id)
+    if t and t.get("group_category_id"):
+        category = guild.get_channel(t["group_category_id"])
+        if category:
+            try:
+                await category.delete(reason="Gruppenphase zurueckgesetzt")
+            except discord.HTTPException:
+                pass
+
+    await pool.execute("DELETE FROM tournament_matches WHERE tournament_id = $1 AND phase = 'group'", tournament_id)
+    await pool.execute("DELETE FROM tournament_groups WHERE tournament_id = $1", tournament_id)
+
+    await pool.execute(
+        "UPDATE tournaments SET phase = 'signup', group_category_id = NULL, group_size_override = $1 WHERE id = $2",
+        new_group_size_override, tournament_id,
+    )
+
+
 async def start_knockout_phase(bot: commands.Bot, guild: discord.Guild, tournament_id: int, t: dict):
     """
     Ermittelt Top-N (Winner) und die naechsten N (Loser) pro Gruppe und startet beide Brackets.
