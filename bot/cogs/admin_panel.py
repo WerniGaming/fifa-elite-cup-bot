@@ -27,6 +27,7 @@ from cogs.tournament_manager import (
     start_group_phase,
     start_knockout_phase,
     reset_knockout_phase,
+    reset_group_phase,
     all_groups_complete,
     refresh_panel,
     get_all_open_matches,
@@ -166,6 +167,72 @@ class ResetKoConfirmView(discord.ui.View):
     @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+
+
+class RegroupConfirmView(discord.ui.View):
+    def __init__(self, tournament_id: int, new_group_size: int):
+        super().__init__(timeout=120)
+        self.tournament_id = tournament_id
+        self.new_group_size = new_group_size
+
+    @discord.ui.button(label="Ja, neu aufteilen", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await reset_group_phase(interaction.client, interaction.guild, self.tournament_id, self.new_group_size)
+            t = await get_tournament(self.tournament_id)
+            await refresh_panel(interaction.client, self.tournament_id)
+            await start_group_phase(interaction.client, interaction.guild, self.tournament_id, t)
+            await interaction.followup.send(
+                embed=success_embed(
+                    "Gruppenphase neu aufgeteilt",
+                    f"Alle Gruppen wurden mit {self.new_group_size}er-Gruppen neu erstellt. "
+                    "Bisherige Gruppenergebnisse wurden dabei gelöscht.",
+                ),
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception(f"Fehler beim Neu-Aufteilen der Gruppenphase fuer Turnier {self.tournament_id}")
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Fehler beim Neu-Aufteilen",
+                    "Bitte im Bot-Log nachschauen (`sudo journalctl -u fifa-elite-cup-v2 -n 50 --no-pager`).",
+                ),
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="Abbrechen", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=None, embed=info_embed("Abgebrochen."), view=None)
+
+
+class RegroupSizeModal(discord.ui.Modal, title="Gruppenphase neu aufteilen"):
+    group_size = discord.ui.TextInput(label="Neue Gruppengröße (Teams pro Gruppe)", max_length=2)
+
+    def __init__(self, tournament_id: int):
+        super().__init__()
+        self.tournament_id = tournament_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            size = int(self.group_size.value)
+        except ValueError:
+            await interaction.response.send_message(embed=error_embed("Gruppengröße muss eine Zahl sein."), ephemeral=True)
+            return
+        if size < 2:
+            await interaction.response.send_message(embed=error_embed("Gruppengröße muss mindestens 2 sein."), ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            embed=warning_embed(
+                "Sicher?",
+                f"Löscht alle bestehenden Gruppen-Kanäle, -Rollen und Gruppen-Ergebnisse unwiderruflich und teilt "
+                f"alle angemeldeten Teams neu in **{size}er-Gruppen** ein. Die KO-Phase ist davon nicht betroffen "
+                "(muss vorher separat zurückgesetzt sein, falls sie schon lief).",
+            ),
+            view=RegroupConfirmView(self.tournament_id, size),
+            ephemeral=True,
+        )
 
 
 class SwapOutSelectView(discord.ui.View):
@@ -415,6 +482,21 @@ class TournamentAdminView(discord.ui.View):
             view=ResetKoConfirmView(self.t["id"]),
             ephemeral=True,
         )
+
+    @discord.ui.button(label="Gruppenphase neu aufteilen", style=discord.ButtonStyle.danger)
+    async def regroup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        t = await get_tournament(self.t["id"])
+        if t.get("phase") != "groups":
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Nicht möglich",
+                    "Neu-Aufteilen ist nur möglich, solange sich das Turnier in der Gruppenphase befindet "
+                    "(läuft schon die KO-Phase, erst mit 'KO-Phase resetten' zurücksetzen).",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(RegroupSizeModal(self.t["id"]))
 
     @discord.ui.button(label="Spielplan-Grafiken posten", style=discord.ButtonStyle.secondary)
     async def post_schedule_graphics(self, interaction: discord.Interaction, button: discord.ui.Button):
